@@ -1,10 +1,13 @@
 # miR-QTL
-Differential expression analysis: freeze082825_DE.Rmd
 
-eQTL analysis: freeze082825_eQTL.Rmd
+1. Differential expression analysis: freeze082825_DE.Rmd
 
-miRNA-host analysis: freeze082825_host_cleaned.Rmd
+2. eQTL analysis: freeze082825_eQTL.Rmd
+Initial eQTL was done with TensorQTL.
 
-TWAS: free082825_TWAS.Rmd
+4. miRNA-host analysis: freeze082825_host_cleaned.Rmd
 
-miRNA target analysis: freeze040625_target.Rmd
+5. TWAS: freeze082825_TWAS.Rmd
+   Initial Fusion analysis were done as described in https://github.com/arunhpatil/miRQTL.
+
+6. miRNA target analysis: freeze040625_target.Rmd
