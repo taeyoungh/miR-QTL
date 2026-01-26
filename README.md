@@ -12,7 +12,7 @@
 
 ## 4. TWAS
 `freeze082825_TWAS.Rmd`
-* Initial Fusion analysis were done as described in https://github.com/arunhpatil/miRQTL.
+* Initial Fusion analysis was performed as described in https://github.com/arunhpatil/miRQTL.
 
 ## 5. miRNA target analysis
 `freeze040625_target.Rmd`
