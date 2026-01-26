@@ -1,0 +1,573 @@
+---
+title: "miRNA eQTL analysis"
+output: html_document
+date: "2025-08-20"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = 1) # Warnings are printed immediately, not delayed (some packages delay warning printing).
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(mashr)
+
+source("/home/taeyoungh/Source/miRNA/miRNA_functions.R")
+```
+
+```{r}
+setwd("~/HwangLab/taeyoungh/miRNA/Results/")
+set.seed(123)
+```
+
+# 1. Read data
+
+TensorQTL result: nominal version
+
+```{r}
+# miRNA
+miRqtl.sampleSheet.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.sampleSheet.list.rds")
+miRqtl.sig.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.sig.list.rds")
+miRqtl.lead.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.lead.list.rds")
+
+# mRNA
+eqtl.sig.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/eqtl.sig.list.rds")
+eqtl.lead.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/eqtl.lead.list.rds")
+```
+
+* sampleSheet: sample sheet used in eQTL analysis
+
+* sig: FDR<0.05
+
+* lead: the most significant variant per gene
+
+```{r}
+gencode.gene.table = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/gencode.gene.table.rds")
+```
+
+* .expressed: if gene was analyzed in eQTL pipeline, True.
+
+* .target: if gene is emiR target, True.
+
+# 2. eQTL results
+
+### Significance and power
+```{r}
+miRqtl.N = sapply(miRqtl.sampleSheet.list, nrow) # number of samples
+```
+
+### Identify independent loci in CAUC
+
+Extract genotype
+```{r}
+temp = bind_rows(miRqtl.sampleSheet.list[c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc")], .id = "tissue")
+
+write.table(cbind(unique(temp$BrNum), unique(temp$BrNum)), file="cauc_brainID.txt", row.names = F, col.names = F, quote = F)
+
+# run on terminal
+# system("plink2 --bfile /mnt/Data1/HwangLab/Arun/adult_finalFreeze-082825/1_Data/Freeze-082925_genotype_qc --keep cauc_brainID.txt --keep-allele-order --make-bed --out cauc_genotype --threads 10") 
+```
+
+plink clump
+```{r}
+temp = bind_rows(miRqtl.sig.list[c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc")], .id = "tissue") %>% group_by(variant_id) %>% slice_min(pval_nominal, n = 1) %>% dplyr::select(variant_id, pval_nominal) %>% dplyr::rename(SNP=variant_id, P=pval_nominal)
+
+write.table(temp, file="freeze082825_eQTL_cauc_sig.txt", sep="\t", row.names = F, col.names = T, quote=F)
+
+# run on terminal
+
+#plink --bfile cauc_genotype --clump freeze082825_eQTL_cauc_sig.txt --clump-r2 0.6 &> freeze082825_eQTL_cauc_sig_clumped.log --threads 10 &> freeze082825_eQTL_cauc_sig_clumped.log
+
+#mv plink.clumped freeze082825_eQTL_cauc_sig_clumped.txt
+```
+
+* Output column description:
+     CHR     Chromosome code
+     F       Results fileset code (1,2,...)
+     SNP     SNP identifier
+     BP      Physical position of SNP (base-pairs)
+     TOTAL   Total number of other SNPs in clump (i.e. passing --clump-kb and --clump-r2 thresholds)
+     NSIG    Number of clumped SNPs that are not significant ( p > 0.05 )
+     S05     Number of clumped SNPs 0.01 < p < 0.05
+     S01     Number of clumped SNPs 0.001 < p < 0.01
+     S001    Number of clumped SNPs 0.0001 < p < 0.001 
+     S0001   Number of clumped SNPs p < 0.0001
+     SP2     List of SNPs names (and fileset code) clumped and significant at --clump-p2
+  
+Read plink output   
+```{r}
+miRqtl.loci.cauc = read.table("freeze082825_eQTL_cauc_sig_clumped.txt", header=T, sep="")
+miRqtl.loci.cauc$SP2 = gsub("\\(1\\)", "", miRqtl.loci.cauc$SP2)
+miRqtl.loci.cauc$SP2 = gsub("NONE", "", miRqtl.loci.cauc$SP2)
+miRqtl.loci.cauc = setNames(paste0("locus_", miRqtl.loci.cauc$SNP), paste(miRqtl.loci.cauc$SNP, miRqtl.loci.cauc$SP2, sep=","))
+length(miRqtl.loci.cauc) # 849
+```
+
+### Identify independent loci in AA
+
+```{r}
+# Extract genotype
+temp = bind_rows(miRqtl.sampleSheet.list[c("dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa")], .id = "tissue")
+
+write.table(cbind(unique(temp$BrNum), unique(temp$BrNum)), file="aa_brainID.txt", row.names = F, col.names = F, quote = F)
+
+# system("plink2 --bfile /mnt/Data1/HwangLab/Arun/adult_finalFreeze-082825/1_Data/Freeze-082925_genotype_qc --keep aa_brainID.txt --keep-allele-order --make-bed --out aa_genotype --threads 10") # run on terminal
+
+# plink clump
+temp = bind_rows(miRqtl.sig.list[c("dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa")], .id = "tissue") %>% group_by(variant_id) %>% slice_min(pval_nominal, n = 1) %>% dplyr::select(variant_id, pval_nominal) %>% dplyr::rename(SNP=variant_id, P=pval_nominal)
+
+write.table(temp, file="freeze082825_eQTL_aa_sig.txt", sep="\t", row.names = F, col.names = T, quote=F)
+```
+
+```{sh}
+# plink --bfile aa_genotype --clump freeze082825_eQTL_aa_sig.txt --clump-r2 0.6 &> freeze082825_eQTL_aa_sig_clumped.log --threads 10 &> freeze082825_eQTL_aa_sig_clumped.log
+
+# mv plink.clumped freeze082825_eQTL_aa_sig_clumped.txt
+```
+
+```{r}
+miRqtl.loci.aa = read.table("freeze082825_eQTL_aa_sig_clumped.txt", header=T, sep="")
+miRqtl.loci.aa$SP2 = gsub("\\(1\\)", "", miRqtl.loci.aa$SP2)
+miRqtl.loci.aa$SP2 = gsub("NONE", "", miRqtl.loci.aa$SP2)
+miRqtl.loci.aa = setNames(paste0("locus_", miRqtl.loci.aa$SNP), paste(miRqtl.loci.aa$SNP, miRqtl.loci.aa$SP2, sep=","))
+length(miRqtl.loci.aa) # 923
+```
+
+### eMiR statistics
+```{r}
+length(unique(do.call(rbind, miRqtl.sig.list)$miRNA)) # 394
+
+length(unique(do.call(rbind, miRqtl.sig.list[c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc")])$miRNA)) # 266
+
+length(unique(do.call(rbind, miRqtl.sig.list[c("dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa")])$miRNA)) # 278
+
+length(unique(do.call(rbind, miRqtl.lead.list)$miRNA)) # 566
+
+sapply(miRqtl.lead.list[c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc")], function(x) {y=subset(x, fdr<0.05); return(unique(y$miRNA))}) %>% unlist() %>% unique() %>% length() # 266
+
+sapply(miRqtl.lead.list[c("dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa")], function(x) {y=subset(x, fdr<0.05); return(unique(y$miRNA))}) %>% unlist() %>% unique() %>% length() # 278
+```
+
+### PVE
+
+Calculate PVE
+```{r}
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    miRqtl.sig.list[[paste0(region, ".", race)]] = miRqtl.sig.list[[paste0(region, ".", race)]] %>% mutate(pve = (2 * (slope^2) * maf * (1 - maf)) / ((2 * (slope^2) * maf * (1 - maf)) + (2 * (slope_se^2) * nrow(miRqtl.sampleSheet.list[[paste0(region, ".", race)]]) * maf * (1 - maf))))
+    
+    eqtl.sig.list[[paste0(region, ".", race)]] = eqtl.sig.list[[paste0(region, ".", race)]] %>% mutate(maf = ifelse(af > 0.5, 1 - af, af)) %>%  mutate(pve = (2 * (slope^2) * maf * (1 - maf)) / ((2 * (slope^2) * maf * (1 - maf)) + (2 * (slope_se^2) * nrow(miRqtl.sampleSheet.list[[paste0(region, ".", race)]]) * maf * (1 - maf))))
+  }
+}
+```
+
+PVE table and figure
+```{r}
+miRqtl.sig.lead.pve = list()
+eqtl.sig.lead.pve = list()
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    miRqtl.sig.lead.pve[[paste0(region, ".", race)]] = data.frame((miRqtl.sig.list[[paste0(region, ".", race)]] %>% group_by(phenotype_id) %>% slice_min(order_by = pve, n = 1) %>% ungroup())[, c("phenotype_id", "pve")], BrainRegion=region, Race=race, N=as.numeric(miRqtl.N[paste0(region, ".", race)]))
+    eqtl.sig.lead.pve[[paste0(region, ".", race)]] = data.frame((eqtl.sig.list[[paste0(region, ".", race)]] %>% group_by(phenotype_id) %>% slice_min(order_by = pve, n = 1) %>% ungroup())[, c("phenotype_id", "pve")], BrainRegion=region, Race=race, N=as.numeric(miRqtl.N[paste0(region, ".", race)]))
+  }
+}
+miRqtl.sig.lead.pve = do.call(rbind, miRqtl.sig.lead.pve)
+eqtl.sig.lead.pve = do.call(rbind, eqtl.sig.lead.pve) %>% left_join(gencode.gene.table[, c("gene_id", "gene_type")], by=c("phenotype_id"="gene_id"))
+
+miRqtl.sig.lead.pve %>% group_by(BrainRegion) %>% summarise(n = n(), mean = mean(pve), min=min(pve), max=max(pve))
+subset(eqtl.sig.lead.pve, gene_type=="protein_coding") %>% group_by(BrainRegion) %>% summarise(n = n(), mean = mean(pve), min=min(pve), max=max(pve))
+subset(eqtl.sig.lead.pve, gene_type=="lincRNA") %>% group_by(BrainRegion) %>% summarise(n = n(), mean = mean(pve), min=min(pve), max=max(pve))
+
+
+temp = rbind(mutate(miRqtl.sig.lead.pve, gene_type="emiR"), left_join(eqtl.sig.lead.pve, gencode.gene.table[, c("gene_id", "gene_type")], by=c("phenotype_id"="gene_id"))) # "miRNA" can be found in gencode.gene
+temp$BrainRegion = paste(factor(temp$BrainRegion, levels=c("dlpfc", "mpfc", "hippo", "caudate"), labels=c("DLPFC", "mPFC", "Hippocampus", "Caudate")), "(N=", temp$N, ")")
+temp$Race = factor(temp$Race, levels=c("cauc", "aa"), labels=c("CAUC", "AA"))
+
+p = ggplot(subset(temp, gene_type %in% c("protein_coding", "lincRNA", "emiR")), aes(x=BrainRegion, fill=gene_type, y=pve*100)) + facet_grid(.~Race, scales="free_x")
+p = p + geom_boxplot()
+p = p + ylim(0, 100)
+p = p + rotate_x_text(45)
+p = p + ylab("Proportion of Variance Explained by Genotype (%)")
+p + ggtitle("Signifant & Lead QTL")
+```
+
+> Nature aging: "The median percent of miRNA expression variance explained by each conditionally independent miR-QTL was 4.1% (interquartile range (IQR) 2.7–7.8%), and 18 eMiRs have a miR-QTL that explains more than 20% of their expression variance. These values reflect not only the true effect size distribution of miR-QTLs but also the detection power in this study. We expect to have captured the strongest miR-QTLs; larger studies would be expected to identify additional miR-QTLs with smaller effect sizes."
+
+
+### Heritability by GCTA
+
+```{r}
+miRqtl.gcta.sig = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.gcta.sig")
+eqtl.gcta.sig = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/eqtl.gcta.sig")
+```
+
+```{r}
+temp = rbind(mutate(miRqtl.gcta.sig, gene_type="miRNA"), subset(eqtl.gcta.sig, gene_type %in% c("protein_coding", "lincRNA")))
+#p = ggboxplot(temp, x = "gene_type", y = "Heritability", add = "jitter", add.params = list(size = 1)) + facet_grid(Race~Region)
+#p = ggviolin(temp, x = "gene_type", y = "Heritability") + facet_grid(Race~Region)
+p = ggviolin(subset(temp, Race=="CAUC" & Region=="DLPFC"), x = "gene_type", y = "Heritability", fill="gene_type")
+p = p + stat_compare_means(comparisons = list( c("miRNA", "protein_coding"), c("protein_coding", "lincRNA"), c("miRNA", "lincRNA")), size=5)
+p = p + rotate_x_text(45)
+p = p + theme(
+  axis.title.x = element_text(size = 16),  # x-axis label
+  axis.title.y = element_text(size = 16),  # y-axis label
+  axis.text.x  = element_text(size = 14),  # x-axis tick labels
+  axis.text.y  = element_text(size = 14)   # y-axis tick labels
+)
+```
+
+# 2. MASH analysis
+
+### mash for miRNA
+
+prepare mash input
+
+```{r}
+# identify common miRNAs across conditions
+miRqtl.miRNA.comm = purrr::reduce(purrr::map(miRqtl.lead.list, ~ .x$phenotype_id), intersect)
+length(miRqtl.miRNA.comm) # 422
+
+# identify top eQTL across tissues
+miRqtl.miRNA.comm = data.frame(phenotype_id = miRqtl.miRNA.comm, top_tissue=NA, top_variant_id=NA)
+temp = paste(rep(c("dlpfc", "mpfc", "hippo", "caudate"), 2), rep(c("cauc", "aa"), each=4), sep=".")
+for (i in 1:nrow(miRqtl.miRNA.comm)) {
+  i.res = sapply(temp, function(x) subset(miRqtl.lead.list[[x]], phenotype_id == miRqtl.miRNA.comm$phenotype_id[i]))
+  miRqtl.miRNA.comm$top_tissue[i] = temp[which.max(as.numeric(i.res["slope",])/as.numeric(i.res["slope_se", ]))] # the largest z-stat
+  miRqtl.miRNA.comm$top_variant_id[i] = as.character(i.res[, miRqtl.miRNA.comm$top_tissue[i]]["variant_id"])
+}
+
+# get the selected from nominal eQTL
+miRqtl.mash.strong.list = list()
+miRqtl.mash.random.list = list()
+
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    print(paste(region, race))
+    
+    load(paste0("2_Results/", region, "-", race, "_miRNA_eqtl.Rdata"))
+
+    miRqtl.mash.strong.list[[paste0(region, ".", race)]] = semi_join(tsqtl.nominal, miRqtl.miRNA.comm, by = c("phenotype_id"="phenotype_id", "variant_id"="top_variant_id"))
+    
+    # identify common tests across tissues
+    miRqtl.mash.random.list[[paste0(region, ".", race)]] = subset(tsqtl.nominal, phenotype_id %in% miRqtl.miRNA.comm$phenotype_id)
+
+    rm(tsqtl.nominal, tsqtl.nominal.sig, tsqtl.nominal.sig.lead, tsqtl.perm, tsqtl.perm.sig, tsqtl.perm.sig.filtered)
+  }
+}
+
+# select common random tests across conditions
+temp = purrr::reduce(purrr::map(miRqtl.mash.random.list, ~ paste(.x$phenotype_id, .x$variant_id)), intersect)
+temp = sample(temp, 50000)
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    miRqtl.mash.random.list[[paste0(region, ".", race)]] = miRqtl.random.list.comm[[paste0(region, ".", race)]] %>% mutate(id=paste(phenotype_id, variant_id)) %>% subset(id %in% temp) %>% arrange(id) %>% dplyr::select(-id)
+  }
+}
+
+# filter genes not found in all the tissues due to variants missing.
+sapply(miRqtl.mash.strong.list, dim)
+temp = purrr::reduce(purrr::map(miRqtl.mash.strong.list, ~ .x$phenotype_id), intersect)
+length(temp) # 274
+miRqtl.mash.strong.list = purrr::map(miRqtl.mash.strong.list, ~ filter(.x, phenotype_id %in% temp) %>% arrange(temp))
+```
+
+> I used 1 random snp per gene, but 9 random snps per gene could be used ? https://github.com/stephenslab/gtexresults/blob/master/workflows/fastqtl_to_mash.ipynb
+
+run mashr
+
+```{r}
+mash.cauc = runMASH(c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc"), miRqtl.mash.strong.list, miRqtl.mash.random.list)
+mash.aa = runMASH(c("dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa"), miRqtl.mash.strong.list, miRqtl.mash.random.list)
+mash.all = runMASH(c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc", "dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa"), miRqtl.mash.strong.list, miRqtl.mash.random.list)
+
+all(rownames(get_pm(mash.cauc)) == rownames(get_pm(mash.aa)))
+all(rownames(get_pm(mash.cauc)) == rownames(get_pm(mash.all)))
+
+# log likelihood
+print(get_loglik(mash.cauc)) # 1011.067
+print(get_loglik(mash.aa)) # 651.38
+print(get_loglik(mash.all)) # 1887.62
+
+# the estimates of the mixture proportions for different types of covariance matrix
+barplot(get_estimated_pi(mash.cauc), las=2) 
+barplot(get_estimated_pi(mash.aa), las=2) 
+barplot(get_estimated_pi(mash.all), las=2) 
+
+head(get_pm(mash.cauc)) # posterior mean
+head(get_psd(mash.cauc)) # posterior standard deviation
+
+mash_plot_meta(mash.cauc, 1, colors=rmeta::meta.colors(background="white"))
+
+# to find the indices of effects that are significant, which here means they have lfsr less than t in at least one condition, where t is a threshold you specify (default 0.05)
+get_significant_results(mash.cauc)
+
+# significance in a condition
+length(get_significant_results(mash.cauc, conditions="dlpfc.cauc")) # or we can use index 1 for the argument of conditions.
+```
+
+```{r}
+mash.res = cbind(as.data.frame(get_pm(mash.cauc)) %>% rename_with(~ paste0(., "_beta")),
+             as.data.frame(get_psd(mash.cauc)) %>% rename_with(~ paste0(., "_betase")),
+             as.data.frame(get_pm(mash.aa)) %>% rename_with(~ paste0(., "_beta")),
+             as.data.frame(get_psd(mash.aa)) %>% rename_with(~ paste0(., "_betase")),
+             as.data.frame((get_lfsr(mash.cauc)<0.05)*1 + (get_lfsr(mash.aa)<0.05)*1) %>% rename_with(~ stringr::str_replace(., ".cauc", "_sig")),
+             as.data.frame(get_pm(mash.all)) %>% rename_with(~ paste0("all_",. , "_beta")),
+             as.data.frame(get_psd(mash.all)) %>% rename_with(~ paste0("all_",. , "_betase")),
+             as.data.frame((get_lfsr(mash.all)<0.05)*1) %>% rename_with(~ paste0("all_", ., "_sig"))
+             )
+```
+
+### mash for mRNA
+
+prepare mash input
+
+```{r}
+# identify common mRNAs across conditions
+eqtl.mRNA.comm = purrr::reduce(purrr::map(eqtl.lead.list, ~ .x$phenotype_id), intersect)
+length(eqtl.mRNA.comm) # 22070
+
+# identify top eQTL across tissues
+eqtl.mRNA.comm = data.frame(phenotype_id = eqtl.mRNA.comm, top_tissue=NA, top_variant_id=NA)
+temp = paste(rep(c("dlpfc", "mpfc", "hippo", "caudate"), 2), rep(c("cauc", "aa"), each=4), sep=".")
+for (i in 1:nrow(eqtl.mRNA.comm)) {
+  i.res = sapply(temp, function(x) subset(eqtl.lead.list[[x]], phenotype_id == eqtl.mRNA.comm$phenotype_id[i]))
+  eqtl.mRNA.comm$top_tissue[i] = temp[which.max(as.numeric(i.res["slope",])/as.numeric(i.res["slope_se", ]))] # the largest z-stat
+  eqtl.mRNA.comm$top_variant_id[i] = as.character(i.res[, eqtl.mRNA.comm$top_tissue[i]]["variant_id"])
+}
+
+# get the selected from nominal eQTL
+eqtl.mash.strong.list = list()
+eqtl.mash.random.list = list()
+
+for (region in c("DLPFC", "mPFC", "Hippo", "Caudate")) {
+  for (race in c("CAUC", "AA")) {
+    print(paste(region, race))
+    
+    parquet_files = list.files(paste0(region, "-", race, "/eQTL/cis_nominal"), pattern = ".*mRNA.*\\.parquet", full.names = TRUE)
+    if (length(parquet_files) == 22) {
+      eqtl.nominal = lapply(parquet_files, arrow::read_parquet) %>% bind_rows() # ~ 160M rows
+      #object.size(eqtl.nominal) # ~ 10GB
+    } else {
+      print(paste0(region, "-", race, " cannot find 22 parquet files"))
+      return()
+    }
+    eqtl.nominal = subset(eqtl.nominal, phenotype_id %in% eqtl.mRNA.comm$phenotype_id)
+    
+    eqtl.mash.strong.list[[tolower(paste0(region, ".", race))]] = semi_join(eqtl.nominal, eqtl.mRNA.comm, by = c("phenotype_id"="phenotype_id", "variant_id"="top_variant_id"))
+    
+    eqtl.mash.random.list[[tolower(paste0(region, ".", race))]] = eqtl.nominal[, c("phenotype_id", "variant_id")] # ~ 2GB
+
+    rm(eqtl.nominal)
+  }
+}
+
+# select common random tests across conditions
+temp = purrr::reduce(purrr::map(eqtl.mash.random.list, ~ paste(.x$phenotype_id, .x$variant_id)), intersect)
+length(temp) # 102,988,589
+temp = sample(temp, 200000) # mash paper used 20k...recommended 200k for sparse data.
+eqtl.mash.random.list = list()
+for (region in c("DLPFC", "mPFC", "Hippo", "Caudate")) {
+  for (race in c("CAUC", "AA")) {
+    print(paste(region, race))
+
+    parquet_files = list.files(paste0(region, "-", race, "/eQTL/cis_nominal"), pattern = ".*mRNA.*\\.parquet", full.names = TRUE)
+    if (length(parquet_files) == 22) {
+      eqtl.nominal = lapply(parquet_files, arrow::read_parquet) %>% bind_rows() # ~ 160M rows
+      #object.size(eqtl.nominal) # ~ 10GB
+    } else {
+      print(paste0(region, "-", race, " cannot find 22 parquet files"))
+      return()
+    }
+    
+    eqtl.mash.random.list[[paste0(region, ".", race)]] = eqtl.nominal %>% mutate(id=paste(phenotype_id, variant_id)) %>% subset(id %in% temp) %>% arrange(id) %>% dplyr::select(-id)
+  }
+}
+names(eqtl.mash.random.list) = tolower(names(eqtl.mash.random.list))
+
+# filter genes not found in all the tissues due to variants missing.
+temp = purrr::reduce(purrr::map(eqtl.mash.strong.list, ~ .x$phenotype_id), intersect)
+length(temp) # 14477
+eqtl.mash.strong.list = purrr::map(eqtl.mash.strong.list, ~ filter(.x, phenotype_id %in% temp) %>% arrange(temp))
+```
+
+run mashr
+
+```{r}
+eqtl.mash.cauc = runMASH(c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc"), eqtl.mash.strong.list, eqtl.mash.random.list)
+eqtl.mash.aa = runMASH(c("dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa"), eqtl.mash.strong.list, eqtl.mash.random.list)
+eqtl.mash.all = runMASH(c("dlpfc.cauc", "mpfc.cauc", "hippo.cauc", "caudate.cauc", "dlpfc.aa", "mpfc.aa", "hippo.aa", "caudate.aa"), eqtl.mash.strong.list, eqtl.mash.random.list)
+
+all(rownames(get_pm(eqtl.mash.cauc)) == rownames(get_pm(eqtl.mash.aa)))
+all(rownames(get_pm(eqtl.mash.cauc)) == rownames(get_pm(eqtl.mash.all)))
+
+# log likelihood
+print(get_loglik(eqtl.mash.cauc)) # 29275.72
+print(get_loglik(eqtl.mash.aa)) # 24390.88
+print(get_loglik(eqtl.mash.all)) # 66731.41
+```
+
+```{r}
+eqtl.mash.res = cbind(as.data.frame(get_pm(eqtl.mash.cauc)) %>% rename_with(~ paste0(., "_beta")),
+             as.data.frame(get_psd(eqtl.mash.cauc)) %>% rename_with(~ paste0(., "_betase")),
+             as.data.frame(get_pm(eqtl.mash.aa)) %>% rename_with(~ paste0(., "_beta")),
+             as.data.frame(get_psd(eqtl.mash.aa)) %>% rename_with(~ paste0(., "_betase")),
+             as.data.frame(get_pm(eqtl.mash.all)) %>% rename_with(~ paste0("all_",. , "_beta")),
+             as.data.frame(get_psd(eqtl.mash.all)) %>% rename_with(~ paste0("all_",. , "_betase"))
+             )
+```
+
+### Sharing across tissues
+
+> Compute the proportion of significant signals shared by magnitude in the estimated effect sizes, for each pair of conditions. For each pair of conditions, first identify the effects that are significant in at least one of the two conditions. Then compute what fraction of these have an estimated (posterior mean) effect size within a factor factor of one another.
+
+miRqtl
+```{r}
+x=get_pairwise_sharing(mash.cauc, factor=0.5) 
+x=get_pairwise_sharing(mash.aa, factor=0) 
+x=get_pairwise_sharing(mash.all, factor=0)
+corrplot::corrplot(x, method='color', col = corrplot::COL1(sequential = "Blues", n = 20), col.lim=c(0.8,1), is.corr=FALSE, type='upper', addCoef.col = "black", tl.col="black", tl.srt=45); title("miRNA", line = 1)
+```
+
+eQTL
+```{r}
+temp1 = data.frame(gene_id=eqtl.mRNA.comm$phenotype_id) %>% left_join(as.data.frame(gencode.gene)[, c("gene_id", "gene_type")])
+sort(table(temp1$gene_type))
+
+# sharing by the same sign
+x=get_pairwise_sharing2(eqtl.mash.all, factor=0,  gene_type_sel = "protein_coding", gene_annot = temp1)
+corrplot::corrplot(x, method='color', col = corrplot::COL1(sequential = "Blues", n = 20), col.lim=c(0.8,1), is.corr=FALSE, type='upper', addCoef.col = "black", tl.col="black", tl.srt=45); title("protein-coding", line = 1)
+
+x=get_pairwise_sharing2(eqtl.mash.all, factor=0, gene_type_sel = "lincRNA", gene_annot = temp1)
+corrplot::corrplot(x, method='color', col = corrplot::COL1(sequential = "Blues", n = 20), col.lim=c(0.8,1), is.corr=FALSE, type='upper', addCoef.col = "black", tl.col="black", tl.srt=45, title = 'lincRNA', mar = c(1,1,1,1)); title("Title", line = -2)
+```
+
+### Tissue-specific significance
+
+MASH: "One fundamental question is which SNPs are eQTLs (that is, associated with gene expression) in which tissues. Answering this could help distinguish regulatory mechanisms that are tissue specific or shared."
+
+```{r}
+# DLPFC vs. Caudate
+p = ggplot(mash.res, aes(x=dlpfc.cauc_beta, y=caudate.cauc_beta)) 
+p = p + geom_errorbarh(aes(xmin=dlpfc.cauc_beta-dlpfc.cauc_betase, xmax=dlpfc.cauc_beta+dlpfc.cauc_betase))
+p = p + geom_errorbar(aes(ymin=caudate.cauc_beta-caudate.cauc_betase, ymax=caudate.cauc_beta+caudate.cauc_betase))
+p = p + geom_point() + geom_smooth(method=lm)
+p
+
+p = ggplot(mash.res, aes(x=all_dlpfc.cauc_beta, y=all_caudate.cauc_beta)) 
+p = p + geom_errorbarh(aes(xmin=all_dlpfc.cauc_beta-all_dlpfc.cauc_betase, xmax=all_dlpfc.cauc_beta+all_dlpfc.cauc_betase))
+p = p + geom_errorbar(aes(ymin=all_caudate.cauc_beta-all_caudate.cauc_betase, ymax=all_caudate.cauc_beta+all_caudate.cauc_betase))
+p = p + geom_point() + geom_smooth(method=lm)
+p
+
+# Hippo vs. Caudate
+p = ggplot(mash.res, aes(x=hippo.cauc_beta, y=caudate.cauc_beta)) 
+p = p + geom_errorbarh(aes(xmin=hippo.cauc_beta-hippo.cauc_betase, xmax=hippo.cauc_beta+hippo.cauc_betase))
+p = p + geom_errorbar(aes(ymin=caudate.cauc_beta-caudate.cauc_betase, ymax=caudate.cauc_beta+caudate.cauc_betase))
+p = p + geom_point() + geom_smooth(method=lm)
+p
+
+p = ggplot(mash.res, aes(x=all_hippo.cauc_beta, y=all_caudate.cauc_beta)) 
+p = p + geom_errorbarh(aes(xmin=all_hippo.cauc_beta-all_hippo.cauc_betase, xmax=all_hippo.cauc_beta+all_hippo.cauc_betase))
+p = p + geom_errorbar(aes(ymin=all_caudate.cauc_beta-all_caudate.cauc_betase, ymax=all_caudate.cauc_beta+all_caudate.cauc_betase))
+p = p + geom_point() + geom_smooth(method=lm)
+p
+```
+
+Examples
+```{r}
+mash.sig.cauc = (get_lfsr(mash.cauc)<0.05)*1
+mash.sig.cauc = mash.sig.cauc[rowSums(mash.sig.cauc)>0 & rowSums(mash.sig.cauc)<4,]
+
+mash.sig.aa = (get_lfsr(mash.aa)<0.05)*1
+mash.sig.aa = mash.sig.aa[rowSums(mash.sig.aa)>0 & rowSums(mash.sig.aa)<4,]
+
+apply(mash.res[intersect(rownames(mash.sig.cauc), rownames(mash.sig.aa)), c("dlpfc.cauc_beta", "mpfc.cauc_beta", "hippo.cauc_beta", "caudate.cauc_beta")],1, max) %>% sort()
+
+apply(mash.res[intersect(rownames(mash.sig.cauc), rownames(mash.sig.aa)), c("dlpfc.aa_beta", "mpfc.aa_beta", "hippo.aa_beta", "caudate.aa_beta")],1, max) %>% sort()
+
+mash.res["MI0003557_hsa-miR-552-3p",]
+mash.res["MI0000486_hsa-miR-190a-5p",]
+
+# boxplot
+temp = subset(miRqtl.lead.list[["dlpfc.cauc"]], phenotype_id=="MI0000486_hsa-miR-190a-5p") %>% as.data.frame()
+temp.expr = read.table("DLPFC-CAUC/eQTL/dlpfc-cauc_miRNA_expr.bed", header=T, sep="\t", comment.char = "")
+temp.genotype = bigsnpr::snp_attach("DLPFC-CAUC/eQTL/dlpfc-cauc_miRNA_tsqtl-cis-nominal.rds")
+
+plot.df = plot.eqtl.raw(temp, temp.expr, temp.genotype)
+table(plot.df$genotype)
+
+temp = subset(miRqtl.lead.list[["hippo.cauc"]], phenotype_id=="MI0003557_hsa-miR-552-3p") %>% as.data.frame()
+temp.expr = read.table("Hippo-CAUC/eQTL/hippo-cauc_miRNA_expr.bed", header=T, sep="\t", comment.char = "")
+temp.genotype = bigsnpr::snp_attach("Hippo-CAUC/eQTL/hippo-cauc_miRNA_tsqtl-cis-nominal.rds")
+
+plot.df = plot.eqtl.raw(temp, temp.expr, temp.genotype)
+table(plot.df$genotype)
+```
+
+> Weak tissue-specificity...
+
+# 3. CAUC vs. AA
+
+### MAF
+
+```{r}
+miRqtl.sig.maf = list()
+for (region in c("DLPFC", "mPFC", "Hippo", "Caudate")) {
+  print(region)
+  
+  temp = full_join(miRqtl.sig.list[[paste0(tolower(region), ".cauc")]][, c("variant_id", "maf")], miRqtl.sig.list[[paste0(tolower(region), ".aa")]][, c("variant_id", "maf")], by="variant_id", suffix=c("_cauc", "_aa"), relationship = "many-to-many") %>% distinct() # many-to-many: due to SNPs associating multiple genes. should be followed by distinct()
+  temp = mutate(temp, race = factor(as.numeric(!is.na(maf_cauc))+2*as.numeric(!is.na(maf_aa)), levels=c(1,2,3), labels=c("CAUC", "AA", "Both")))
+  
+  temp$maf_cauc2 = NA
+  bed = bigsnpr::bed(paste0("/mnt/Data1/HwangLab/Arun/adult_finalFreeze-082825/", region, "-CAUC", "/eQTL/", tolower(region), "-cauc_genotype.bed"))
+  idx = match(temp$variant_id, bed$map$marker.ID)
+  temp$maf_cauc2[which(!is.na(idx))] = bigsnpr::bed_MAF(bed, ind.col=idx[!is.na(idx)])$maf
+  
+  temp$maf_aa2 = NA
+  bed = bigsnpr::bed(paste0("/mnt/Data1/HwangLab/Arun/adult_finalFreeze-082825/", region, "-AA", "/eQTL/", tolower(region), "-aa_genotype.bed"))
+  idx = match(temp$variant_id, bed$map$marker.ID)
+  temp$maf_aa2[which(!is.na(idx))] = bigsnpr::bed_MAF(bed, ind.col=idx[!is.na(idx)])$maf
+
+  # check
+  # subset(temp, !is.na(maf_cauc) & !is.na(maf_aa)) %>% head()
+
+  miRqtl.sig.maf[[region]] = mutate(temp, maf_cauc=maf_cauc2, maf_aa=maf_aa2) %>% dplyr::select(-maf_cauc2, -maf_aa2)
+}
+
+miRqtl.sig.maf = bind_rows(miRqtl.sig.maf, .id = "tissue")
+summary(miRqtl.sig.maf$maf_cauc)
+summary(miRqtl.sig.maf$maf_aa)
+miRqtl.sig.maf$maf_cauc[which(is.na(miRqtl.sig.maf$maf_cauc))] = 0
+miRqtl.sig.maf$maf_aa[which(is.na(miRqtl.sig.maf$maf_aa))] = 0
+```
+
+```{r}
+p = ggplot(miRqtl.sig.maf, aes(x=maf_cauc, y=maf_aa, col=race)) + facet_grid(race~tissue)
+p = p + geom_point(alpha=0.2)
+p = p + geom_abline(intercept = 0, slope=1, linetype="dashed")
+p
+```
+
+
+# 4. Save
+```{r}
+miRqtl.mash.cauc = mash.cauc
+miRqtl.mash.aa = mash.aa
+miRqtl.mash.all = mash.all
+miRqtl.mash.res = mash.res
+
+save(miRqtl.sampleSheet.list, 
+     miRqtl.sig.list, miRqtl.lead.list, eqtl.sig.list, eqtl.lead.list, 
+     miRqtl.loci.cauc, miRqtl.loci.aa, 
+     miRqtl.sig.lead.pve, eqtl.sig.lead.pve, 
+     miRqtl.miRNA.comm, miRqtl.mash.strong.list, miRqtl.mash.random.list, miRqtl.mash.cauc, miRqtl.mash.aa, miRqtl.mash.all, miRqtl.mash.cauc.sig, miRqtl.mash.aa.sig, miRqtl.mash.res,
+     eqtl.mRNA.comm, eqtl.mash.strong.list, eqtl.mash.random.list, eqtl.mash.cauc, eqtl.mash.aa, eqtl.mash.all, 
+     fetal.pve, miRqtl.sig.maf,
+     file="freeze082825_eQTL.Rdata")
+```
+

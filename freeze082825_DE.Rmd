@@ -1,0 +1,649 @@
+---
+title: "Differential expression"
+output: html_document
+date: "2025-12-17"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = 1) # Warnings are printed immediately, not delayed (some packages delay warning printing).
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+source("~/Source/miRNA/miRNA_functions.R")
+```
+
+```{r}
+setwd("/mnt/Data1/HwangLab/Arun/adult_finalFreeze-082825/")
+```
+
+# 1. Import data
+
+miRNA expression
+```{r}
+load("1_Data/Freeze-040625_miRNA_qc.Rdata") # sampleSheet, miRcount, miRcount.vst, miRcount.vst.lmRes
+
+nrow(sampleSheet)
+dim(miRcount)
+```
+
+* miRcount.vst: DESeq2 vst normalization with blind=F, design=~RIN2+Age2+BrainRegion+Sex+Race+PrimaryDx.
+
+* miRcount.vst.lmRes: residual from regression (lm) of DESeq2 vst-normalized values on scale(RIN), scale(log10(miRcount)), and scale(Age).
+
+Update sampleSheet
+```{r}
+sampleSheet = readRDS("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/sampleSheet.rds")
+nrow(sampleSheet) # 995
+all(sampleSheet$RNum_miRNA == colnames(miRcount))
+```
+
+Full residual
+```{r}
+miRcount.vst.lmCov5res = readRDS("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRcount.vst.lmCov5res.rds")
+```
+
+* miRcount.vst.lmCov5res: residual from regression (lm) of DESeq2 vst-normalized values on scale(RIN), scale(log10(miRcount)), scale(Age), Sex, and PrimaryDx.
+
+# 2. EDA
+
+#### normalization with blind=T
+```{r}
+miRcount.normed = DESeq2::DESeqDataSetFromMatrix(countData = miRcount, colData = sampleSheet, design = ~ 1) %>% DESeq2::varianceStabilizingTransformation(blind=T) %>% SummarizedExperiment::assay()
+
+fit = lm(t(miRcount.normed) ~ RIN2 + miRcountLog2 + Age2 + Sex + PrimaryDx, data=sampleSheet %>% mutate(RIN2=scale(RIN), Age2=scale(Age), miRcountLog2=scale(miRcountLog)))
+
+miRcount.normed.lmCov5res = t(fit$residuals)
+```
+
+> We used blind=F for downstream analyses including eQTL, but here we used blind=T for clustering by following DESeq2 manual. For example, note that miRcount.normed: blind=T (only used in EDA), miRcount.vst: blind=F
+
+#### PCA
+
+Using Depth-normalization
+```{r}
+idx <- which(apply(miRcount.normed, 1, var)>0)
+pca.obj <- prcomp(t(miRcount.normed[idx,]), center=T, scale=T)
+pca.table <- data.frame(sampleSheet, PC1=pca.obj$x[,1], PC2=pca.obj$x[,2])
+pca.var <- signif(((pca.obj$sdev)^2)/(sum((pca.obj$sdev)^2)),3)*100
+```
+
+```{r}
+p <- ggplot(pca.table, aes(PC1, PC2, color=miRcountLog))
+p <- p + geom_point(size=3, alpha=0.8)
+p <- p + xlab(paste0("PC1: ", pca.var[1], "% variance")) 
+p <- p + ylab(paste0("PC2: ", pca.var[2], "% variance"))
+p
+```
+
+> PC1 is still correlated with depth.
+
+Using residual from LM
+```{r}
+idx <- which(apply(miRcount.normed.lmCov5res, 1, var)>0)
+pca.obj <- prcomp(t(miRcount.normed.lmCov5res[idx,]), center=T, scale=T)
+pca.table <- data.frame(sampleSheet, PC1=pca.obj$x[,1], PC2=pca.obj$x[,2])
+pca.var <- signif(((pca.obj$sdev)^2)/(sum((pca.obj$sdev)^2)),3)*100
+```
+
+```{r}
+#p <- ggplot(pca.table, aes(PC1, PC2, color=miRcountLog))
+p <- ggplot(pca.table, aes(PC1, PC2, color=BrainRegion))
+p <- p + geom_point(size=3, alpha=0.8)
+p <- p + xlab(paste0("PC1: ", pca.var[1], "% variance")) 
+p <- p + ylab(paste0("PC2: ", pca.var[2], "% variance"))
+p
+```
+
+> PC1 is not correlated with depth anymore.
+
+> PC1 & PC2: brain region
+
+#### UMAP
+
+Using depth normalization
+```{r}
+idx = which(apply(miRcount.normed, 1, var)>0)
+length(idx)
+umap.obj = umap::umap(t(miRcount.normed[idx,]))
+umap.table = data.frame(sampleSheet, normed.UMAP1=umap.obj$layout[,1], normed.UMAP2=umap.obj$layout[,2])
+```
+
+```{r}
+p <- ggplot(umap.table, aes(normed.UMAP1, normed.UMAP2, color=miRcountLog))
+p <- p + geom_point(size=2, alpha=0.8)
+p
+```
+
+```{r}
+p <- ggplot(umap.table, aes(normed.UMAP1, normed.UMAP2, color=BrainRegion))
+p <- p + geom_point(size=2, alpha=0.8)
+p
+```
+
+> clear clustering by brain region without covariate adjustment...
+
+Using residual from LM
+```{r}
+idx = which(apply(miRcount.normed.lmCov5res, 1, var)>0)
+length(idx)
+umap.obj = umap::umap(t(miRcount.normed.lmCov5res[idx,]))
+umap.table = mutate(umap.table, normed.lmRes.UMAP1=umap.obj$layout[,1], normed.lmRes.UMAP2=umap.obj$layout[,2])
+```
+
+```{r}
+p <- ggplot(umap.table, aes(normed.lmRes.UMAP1, normed.lmRes.UMAP2, color=BrainRegion))
+p <- p + geom_point(size=2, alpha=0.8)
+p
+```
+
+> clustering became worse with residual...
+
+
+# 3. Region DE
+
+#### DESeq2
+```{r}
+region.deseq2 = DESeqDataSetFromMatrix(countData=miRcount, colData=sampleSheet, design= ~ RIN + miRcountLog + Sex + Race + PrimaryDx + BrainRegion)
+sizeFactors(region.deseq2) = sampleSheet$sizeFactor
+region.deseq2 = DESeq(region.deseq2, test="LRT", reduced = ~ RIN + miRcountLog + Sex + Race + PrimaryDx)
+region.res = results(region.deseq2)
+head(region.res)
+all(rownames(region.res) == rownames(miRcount))
+```
+
+> Warnings: "some variables in design formula are characters, converting to factors
+  the design formula contains one or more numeric variables that have mean or
+  standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+  Including numeric variables with large mean can induce collinearity with the intercept.
+  Users should center and scale numeric variables in the design to improve GLM convergence."
+  
+> Warnings: "21 rows did not converge in beta, labelled in mcols(object)$fullBetaConv. Use larger maxit argument with nbinomLRT"
+
+```{r}
+hist(region.res$pvalue)
+plotDispEsts(region.deseq2)
+table(region.res$padj<0.01) # 808 -> 789 with PrimaryDx
+```
+
+#### Including continuous ancestry as a covariate
+```{r}
+ancestry.deseq2 = DESeqDataSetFromMatrix(countData=miRcount, colData=sampleSheet, design= ~ RIN + miRcountLog + Sex + PrimaryDx + ancestry.Afr + BrainRegion)
+sizeFactors(ancestry.deseq2) = sampleSheet$sizeFactor
+ancestry.deseq2 = DESeq(ancestry.deseq2, test="LRT", reduced = ~ RIN + miRcountLog + Sex + PrimaryDx + ancestry.Afr)
+ancestry.res = results(ancestry.deseq2)
+head(ancestry.res)
+```
+
+> Warnings: "some variables in design formula are characters, converting to factors
+  the design formula contains one or more numeric variables that have mean or
+  standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+  Including numeric variables with large mean can induce collinearity with the intercept.
+  Users should center and scale numeric variables in the design to improve GLM convergence."
+  
+> Warnings: "22 rows did not converge in beta, labelled in mcols(object)$fullBetaConv. Use larger maxit argument with nbinomLRT" with PrimaryDx
+
+```{r}
+hist(ancestry.res$pvalue)
+plotDispEsts(ancestry.deseq2)
+table(ancestry.res$padj<0.01) # 806->795 with PrimaryDx
+
+length(intersect(rownames(subset(region.res, padj<0.01)), rownames(subset(ancestry.res, padj<0.01)))) # 806->788 with PrimaryDx
+```
+
+> No significant improvement/difference
+
+#### Paired (region|Brain tissue) data
+
+> Taking long time... do not use...
+
+```{r}
+#paired.deseq2 = DESeqDataSetFromMatrix(countData=miRcount, colData=sampleSheet, design= ~ BrNum + RIN + miRcountLog + BrainRegion)
+#sizeFactors(paired.deseq2) = sampleSheet$sizeFactor
+#paired.deseq2 = DESeq(paired.deseq2, test="LRT", reduced = ~ BrNum + RIN + miRcountLog)
+#paired.res = results(paired.deseq2)
+#head(paired.res)
+```
+
+
+#### Effect size: max differences among pairwise comparisons
+```{r}
+# mean expression in each brain region
+for (r in c("DLPFC", "mPFC", "HIPPO", "Caudate")) {
+  region.res[,r] = rowMeans(miRcount.vst.lmCov5res[, subset(sampleSheet, BrainRegion == r)$RNum_miRNA])
+}
+
+# find lowest and highest regions for every miRNA
+region.res$lowest.tissue = c("DLPFC", "mPFC", "HIPPO", "Caudate")[apply(region.res[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], 1, which.min)]
+region.res$highest.tissue = c("DLPFC", "mPFC", "HIPPO", "Caudate")[apply(region.res[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], 1, which.max)]
+
+# calculate max diff. among pairwise comparisons.
+temp = as.matrix(region.res[,c("DLPFC", "mPFC", "HIPPO", "Caudate")]) # get a "matrix" for subsetting.
+region.res$maxDiff = temp[cbind(1:nrow(temp), match(region.res$highest.tissue, colnames(temp)))]-temp[cbind(1:nrow(temp), match(region.res$lowest.tissue, colnames(temp)))]
+
+summary(region.res$maxDiff)
+hist(region.res$maxDiff, breaks = seq(0,3.1,by=0.01))
+```
+
+#### Summary plot
+```{r}
+# MA plot
+p = ggplot(as.data.frame(subset(region.res, !is.na(padj))), aes(x=log10(baseMean), y=maxDiff, col=padj<0.01))
+p = p + geom_point()
+p = p + scale_color_manual(values=c("grey", "red"))
+p + ggtitle("Control: region DE")
+
+# Volcano plot
+p = ggplot(as.data.frame(subset(region.res, !is.na(padj))), aes(x=maxDiff, y=-log10(pvalue), col=padj<0.01))
+p = p + geom_point()
+p = p + scale_color_manual(values=c("grey", "red"))
+p + ggtitle("Control: region DE")
+```
+
+#### DE Sig
+```{r}
+region.sig <- as.data.frame(subset(region.res, maxDiff>0.1 & padj<0.01)) # 624
+region.sig <- as.data.frame(subset(region.res, maxDiff>0.5 & padj<0.01)) # 63
+dim(region.sig)
+```
+
+Examples
+```{r}
+# top list
+region.sig %>% arrange(desc(abs(maxDiff))) %>% head()
+
+p.miRNA = "hsa-miR-184"
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="PrimaryDx", shape="Race", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+```
+
+Heatmap of mean expression
+```{r}
+pheatmap::pheatmap(region.sig[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], scale = "row", fontsize_row = 6)
+
+with(region.sig, table(highest.tissue, lowest.tissue))
+```
+
+#### Region-specific miRNAs
+
+```{r}
+cohen_d <- function(x, group_labels, target_group) { # target group vs non-target group
+  idx <- group_labels %in% target_group
+  x_target <- x[idx]
+  x_rest   <- x[-idx]
+  
+  n1 <- length(x_target)
+  n2 <- length(x_rest)
+  
+  mean1 <- mean(x_target, na.rm = TRUE)
+  mean2 <- mean(x_rest, na.rm = TRUE)
+  
+  # Pooled SD
+  sd1 <- sd(x_target, na.rm = TRUE)
+  sd2 <- sd(x_rest, na.rm = TRUE)
+  s_pooled <- sqrt(((n1 - 1)*sd1^2 + (n2 - 1)*sd2^2) / (n1 + n2 - 2))
+  
+  d <- (mean1 - mean2) / s_pooled
+  return(d)
+}
+
+cohen_d2 <- function(x, group_labels, target_group) { # target group vs second highest group
+  
+  group_means = data.frame(value = x, group = group_labels) %>% group_by(group) %>% summarise(mean_value = mean(value, na.rm = TRUE))
+  
+  cont_group = as.character(group_means$group[which(order(group_means$mean_value, decreasing = T)==2)])
+  
+  x_target <- x[group_labels %in% target_group]
+  x_cont   <- x[group_labels %in% cont_group]
+  
+  n1 <- length(x_target)
+  n2 <- length(x_cont)
+  
+  mean1 <- mean(x_target, na.rm = TRUE)
+  mean2 <- mean(x_cont, na.rm = TRUE)
+  
+  # Pooled SD
+  sd1 <- sd(x_target, na.rm = TRUE)
+  sd2 <- sd(x_cont, na.rm = TRUE)
+  s_pooled <- sqrt(((n1 - 1)*sd1^2 + (n2 - 1)*sd2^2) / (n1 + n2 - 2))
+  
+  d <- (mean1 - mean2) / s_pooled
+  return(d)
+}
+
+# cohen_d
+region.sig$pfcSpecific=sapply(rownames(region.sig), function(x) {cohen_d(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, c("DLPFC", "mPFC"))})
+region.sig$hippoSpecific=sapply(rownames(region.sig), function(x) {cohen_d(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, "HIPPO")})
+region.sig$caudateSpecific=sapply(rownames(region.sig), function(x) {cohen_d(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, "Caudate")})
+
+# cohen_d2
+region.sig$pfcSpecific2=sapply(rownames(region.sig), function(x) {cohen_d2(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, c("DLPFC", "mPFC"))})
+region.sig$hippoSpecific2=sapply(rownames(region.sig), function(x) {cohen_d2(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, "HIPPO")})
+region.sig$caudateSpecific2=sapply(rownames(region.sig), function(x) {cohen_d2(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, "Caudate")})
+```
+
+```{r}
+hist(region.sig$pfcSpecific2)
+hist(region.sig$hippoSpecific2)
+hist(region.sig$caudateSpecific2)
+
+pheatmap::pheatmap(subset(region.sig, pfcSpecific2>1)[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], cluster_cols = F, main="pfcSpecific2>1")
+
+pheatmap::pheatmap(subset(region.sig, hippoSpecific2>1)[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], cluster_cols=F, main="hippoSpecific2>1") 
+
+pheatmap::pheatmap(subset(region.sig, caudateSpecific>1)[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], cluster_cols=F, main="caudateSpecific2>1")
+```
+
+Examples
+```{r}
+# PFC
+p.miRNA = "hsa-miR-203a-3p"
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="PrimaryDx", shape="Race", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+
+# HIPPO
+p.miRNA = "hsa-miR-184"
+#p.miRNA = "hsa-miR-1911-5p"
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="PrimaryDx", shape="Race", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+
+# Caudate
+p.miRNA = "hsa-miR-4484"
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="PrimaryDx", shape="Race", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+```
+
+# 5. Race DE
+
+#### DESeq2
+
+```{r}
+race.res = list()
+
+# Across all regions
+deseq2.obj = DESeq2::DESeqDataSetFromMatrix(countData=miRcount, colData=sampleSheet, design= ~ RIN + miRcountLog + Sex + PrimaryDx + BrainRegion + Race)
+sizeFactors(deseq2.obj) = sampleSheet$sizeFactor
+deseq2.obj = DESeq2::DESeq(deseq2.obj)
+race.res[["all"]] = as.data.frame(results(deseq2.obj)) %>% tibble::rownames_to_column("mirgeID")
+```
+
+> "18 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest"
+
+```{r}
+# Separated by region
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  print(region)
+  tempSheet= subset(sampleSheet, tolower(BrainRegion)==region)
+  deseq2.obj = DESeq2::DESeqDataSetFromMatrix(countData=miRcount[, tempSheet$RNum_miRNA], colData=tempSheet, design= ~ RIN + miRcountLog + Sex + PrimaryDx + Race)
+  sizeFactors(deseq2.obj) = tempSheet$sizeFactor
+  deseq2.obj = DESeq2::DESeq(deseq2.obj)
+  race.res[[region]] = as.data.frame(results(deseq2.obj)) %>% tibble::rownames_to_column("mirgeID")
+}
+```
+
+> "Warning in DESeqDataSet(se, design = design, ignoreRank) :
+  some variables in design formula are characters, converting to factors
+  the design formula contains one or more numeric variables that have mean or
+  standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+  Including numeric variables with large mean can induce collinearity with the intercept.
+  Users should center and scale numeric variables in the design to improve GLM convergence."
+
+> DLPFC "16 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest", 
+
+> mPFC "1 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest", 
+
+> hippo "2 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest"
+
+
+```{r}
+# continuous ancestry
+tempSheet = subset(sampleSheet, Race=="AA")
+deseq2.obj = DESeq2::DESeqDataSetFromMatrix(countData=miRcount[, tempSheet$RNum_miRNA], colData=tempSheet, design= ~ RIN + miRcountLog + Sex + PrimaryDx + BrainRegion + ancestry.Afr)
+sizeFactors(deseq2.obj) = tempSheet$sizeFactor
+deseq2.obj = DESeq2::DESeq(deseq2.obj)
+race.res[["aa_all"]] = as.data.frame(results(deseq2.obj)) %>% tibble::rownames_to_column("mirgeID")
+```
+
+> "31 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest"
+
+```{r}
+race.res = do.call(rbind, race.res) 
+race.res = race.res %>% tibble::rownames_to_column("temp") %>% mutate(region=stringr::word(temp, 1, sep = "\\.")) %>% dplyr::select(region, mirgeID, everything()) %>% dplyr::select(-temp)
+```
+
+#### QC
+```{r}
+# p-value distribution
+p = ggplot(race.res, aes(x=pvalue)) + facet_grid(.~region)
+p = p + geom_histogram()
+p
+
+# MA
+p = ggplot(race.res, aes(x=log10(baseMean), y=log2FoldChange, col=padj<0.05)) + facet_grid(.~region)
+p = p + geom_point()
+p
+
+# Volcano
+p = ggplot(race.res, aes(x=log2FoldChange, y=-log10(padj))) + facet_grid(.~region)
+p = p + geom_point()
+p
+```
+
+#### Race Sig
+
+```{r}
+with(race.res, table(padj<0.01, region))
+
+race.sig <- subset(race.res, padj<0.01)
+```
+
+#### Examples
+```{r}
+# top list
+race.sig %>% arrange(desc(log2FoldChange)) %>% head(10)
+p.miRNA = "hsa-miR-577-5p"
+
+race.sig %>% arrange(log2FoldChange) %>% head()
+p.miRNA = "hsa-miR-1304-3p"
+p.miRNA = "hsa-miR-4482-3p"
+
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="Race", shape="PrimaryDx", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+```
+
+
+# 6. Control vs. SCZ
+
+#### DESeq2
+```{r}
+scz.res = list()
+# separated by region
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  print(region)
+  tempSheet = subset(sampleSheet, PrimaryDx %in% c("Control", "Schizo") & tolower(BrainRegion)==region)
+  deseq2.obj = DESeq2::DESeqDataSetFromMatrix(countData=miRcount[, tempSheet$RNum_miRNA], colData=tempSheet, design= ~ RIN + miRcountLog + Sex + Race + PrimaryDx)
+  sizeFactors(deseq2.obj) = tempSheet$sizeFactor
+  deseq2.obj = DESeq2::DESeq(deseq2.obj)
+  scz.res[[region]] = as.data.frame(results(deseq2.obj)) %>% tibble::rownames_to_column("mirgeID")
+}
+
+# Across all regions
+tempSheet = subset(sampleSheet, PrimaryDx %in% c("Control", "Schizo"))
+deseq2.obj = DESeq2::DESeqDataSetFromMatrix(countData=miRcount[, tempSheet$RNum_miRNA], colData=tempSheet, design= ~ RIN + miRcountLog + Sex + Race + BrainRegion + PrimaryDx)
+sizeFactors(deseq2.obj) = tempSheet$sizeFactor
+deseq2.obj = DESeq2::DESeq(deseq2.obj)
+scz.res[["all"]] = as.data.frame(results(deseq2.obj)) %>% tibble::rownames_to_column("mirgeID")
+```
+
+> "Warning in DESeqDataSet(se, design = design, ignoreRank) :
+  some variables in design formula are characters, converting to factors
+  the design formula contains one or more numeric variables that have mean or
+  standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+  Including numeric variables with large mean can induce collinearity with the intercept.
+  Users should center and scale numeric variables in the design to improve GLM convergence."
+  
+> all "11 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest"
+
+```{r}
+scz.res = do.call(rbind, scz.res) 
+scz.res = scz.res %>% tibble::rownames_to_column("temp") %>% mutate(region=stringr::word(temp, 1, sep = "\\.")) %>% dplyr::select(region, mirgeID, everything()) %>% dplyr::select(-temp)
+```
+
+#### QC
+```{r}
+# p-value distribution
+p = ggplot(scz.res, aes(x=pvalue)) + facet_grid(.~region)
+p = p + geom_histogram()
+p
+
+# MA
+p = ggplot(scz.res, aes(x=log10(baseMean), y=log2FoldChange, col=padj<0.05)) + facet_grid(.~region)
+p = p + geom_point()
+p
+
+# Volcano
+p = ggplot(scz.res, aes(x=log2FoldChange, y=-log10(padj))) + facet_grid(.~region)
+p = p + geom_point()
+p
+```
+
+#### SCZ Sig
+
+```{r}
+with(scz.res, table(padj<0.01, region))
+
+scz.sig <- subset(scz.res, padj<0.01)
+```
+
+#### Examples
+```{r}
+# top list
+scz.sig %>% arrange(desc(log2FoldChange)) %>% head()
+p.miRNA = "hsa-miR-122-5p"
+
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="Race", shape="PrimaryDx", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+```
+
+# 7. Control vs. (SCZ | MDD | Bipolar) in DLPFC
+
+#### DESeq2
+```{r}
+tempSheet = subset(sampleSheet, BrainRegion=="DLPFC")
+deseq2.obj = DESeq2::DESeqDataSetFromMatrix(countData=miRcount[, tempSheet$RNum_miRNA], colData=tempSheet, design= ~ RIN + miRcountLog + Sex + Race + PrimaryDx)
+sizeFactors(deseq2.obj) = tempSheet$sizeFactor
+deseq2.obj = DESeq2::DESeq(deseq2.obj, test="LRT", reduced = ~ RIN + miRcountLog + Sex + Race)
+dlpfcDisease.res = as.data.frame(results(deseq2.obj)) %>% tibble::rownames_to_column("mirgeID")
+```
+
+> "Warning in DESeqDataSet(se, design = design, ignoreRank) :
+  some variables in design formula are characters, converting to factors
+  the design formula contains one or more numeric variables that have mean or
+  standard deviation larger than 5 (an arbitrary threshold to trigger this message).
+  Including numeric variables with large mean can induce collinearity with the intercept.
+  Users should center and scale numeric variables in the design to improve GLM convergence."
+
+> "13 rows did not converge in beta, labelled in mcols(object)$betaConv. Use larger maxit argument with nbinomWaldTest"
+
+#### QC
+```{r}
+# p-value distribution
+p = ggplot(dlpfcDisease.res, aes(x=pvalue))
+p = p + geom_histogram()
+p
+
+# MA
+p = ggplot(dlpfcDisease.res, aes(x=log10(baseMean), y=log2FoldChange, col=padj<0.05))
+p = p + geom_point()
+p
+
+# Volcano
+p = ggplot(dlpfcDisease.res, aes(x=log2FoldChange, y=-log10(padj)))
+p = p + geom_point()
+p
+```
+
+#### dlpfcDisease Sig
+
+```{r}
+table(dlpfcDisease.res$padj<0.01)
+
+dlpfcDisease.sig <- subset(dlpfcDisease.res, padj<0.01)
+```
+
+#### Examples
+```{r}
+# top list
+dlpfcDisease.sig %>% arrange(desc(log2FoldChange)) %>% head()
+p.miRNA = "hsa-miR-328-3p"
+
+dlpfcDisease.sig %>% arrange(log2FoldChange) %>% head()
+p.miRNA = "hsa-miR-219a-5p"
+p.miRNA = "hsa-miR-374a-3p"
+#p <- ggpubr::ggboxplot(subset(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), PrimaryDx %in% c("Control", "Schizo")), x="BrainRegion", y="expr", add="jitter", col="PrimaryDx", add.params=list(alpha=0.5)) + facet_grid(.~Race)
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="PrimaryDx", add.params=list(alpha=0.5)) + facet_grid(.~Race)
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+
+p.miRNA = "hsa-miR-577-5p"
+p.miRNA = "hsa-miR-1299"
+p.miRNA = "hsa-miR-412-5p"
+p <- ggpubr::ggboxplot(data.frame(sampleSheet, expr=miRcount.vst.lmRes[p.miRNA, ]), x="BrainRegion", y="expr", add="jitter", col="Race", shape="PrimaryDx", add.params=list(alpha=0.5))
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p + ggtitle(p.miRNA)
+```
+
+```{r}
+temp = data.frame(sampleSheet, mir2682=miRcount.vst["hsa-miR-2682-5p", ], mir137=miRcount.vst["hsa-miR-137-3p", ])
+temp = melt(temp, measure.vars = c("mir2682", "mir137"), value.name = "normedCount", variable.name="miRNA")
+
+p <- ggpubr::ggboxplot(temp, x="BrainRegion", y="normedCount", add="jitter", col="miRNA", add.params=list(alpha=0.5)) + facet_grid(PrimaryDx~Race)
+#p <- p + ggpubr::stat_compare_means(method="anova")
+p <- p + theme(legend.position="right")
+p <- p + ylab("Normalized Count \n(log scale)") + xlab("Brain Region")
+p
+
+```
+
+# Save results
+```{r}
+de.umap = umap.table
+de.region.res = region.res
+de.region.sig = region.sig
+de.race.res = race.res
+de.race.sig = race.sig
+de.scz.res = scz.res
+de.scz.sig = scz.sig
+de.dlpfcDisease.res = dlpfcDisease.res
+de.dlpfcDisease.sig = dlpfcDisease.sig
+
+save(de.umap, de.region.res, de.region.sig, de.race.res, de.race.sig, de.scz.res, de.scz.sig, de.dlpfcDisease.res, de.dlpfcDisease.sig, file="~/HwangLab/taeyoungh/miRNA/Results/freeze082825_DE.Rdata")
+```
+
+

@@ -1,0 +1,170 @@
+---
+title: "miRNA eQTL miRNA-mRNA"
+output: html_document
+date: "2025-09-16"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = 1) # Warnings are printed immediately, not delayed (some packages delay warning printing).
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+source("~/Source/miRNA/miRNA_functions.R")
+```
+
+# 0. Data
+
+```{r}
+setwd("/mnt/Data1/HwangLab/Arun/adult_finalFreeze-082825/")
+```
+
+miRNA mapping
+```{r}
+load("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Annotation/miRNA_mapping.Rdata") # miRge.id.expanded, miRge.index, miRge.index.seq, miRBase.coord
+```
+
+Target DB
+```{r}
+mirdb = readRDS("/mnt/Data1/HwangLab/Arun/Adult_Freeze-040625/Annotation/miRNA_annot_mirdb.rds")
+```
+
+Functions
+```{r}
+source("~/Source/miRNA/miRNA_functions.R") # runColoc
+```
+
+# 1. Read data
+
+```{r}
+miRqtl.lead.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.lead.list")
+miRqtl.sampleSheet.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.sampleSheet.list")
+gencode.gene.table = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/gencode.gene.table.rds")
+
+miRcount.vst.lmCov5res = readRDS("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRcount.vst.lmCov5res.rds")
+mRNAcount.vst.lmCov5res = readRDS("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/mRNAcount.vst.lmCov5res.rds")
+
+load("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-040625/1_Data/Freeze-040625_miRNA_qc.Rdata") # sampleSheet, miRcount, miRcount.vst, miRcount.vst.lmRes
+
+# sampleSheet = readRDS("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Adult_Freeze-040625/1_Data/Freeze-040625_miRNA_qc_sampleSheet_20261010.rds") 
+sampleSheet = readRDS("/home/taeyoungh/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/sampleSheet.rds") # just copied for consistency: should be same with the above line
+```
+
+# 2. Correlation between emir and host
+
+calculate correlation for all miRNA-host pairs
+
+> Use full covariates-adjusted residual.
+
+```{r}
+miRqtl.all.host = list()
+for (region in c("DLPFC", "mPFC", "Hippo", "Caudate")) {
+  for (race in c("CAUC", "AA")) {
+    print(paste(region, race))
+    
+    cur.RNum.miRNA = miRqtl.sampleSheet.list[[paste0(tolower(region), ".", tolower(race))]]$RNum
+    cur.RNum.mRNA = sampleSheet$RNum_mRNA[match(cur.RNum.miRNA, sampleSheet$RNum_miRNA)]
+    
+    # as mirna.bed only have cleaned name in miRge.index (aka miRcount.index), we should find the miRge index, again...
+    # Ideally, we should use miRge.id.expanded to retrieve ids for count data, but it failed due to the following cases of 1-to-many:
+    # MI0006361_hsa-miR-548l can be mapped to either miRge.id.expanded[["hsa-miR-548l"]] or miRge.id.expanded[["hsa-miR-548l.SNPD"]]
+    # MI0000815_hsa-miR-339-3p can be mapped to either miRge.id.expanded[["hsa-miR-339-3p"]] or miRge.id.expanded[["hsa-miR-339-3p.SNPB"]]
+    
+    miRcount.runIdx = which(rowSums(miRcount[, cur.RNum.miRNA] >= 10) >= 10)
+    temp = sapply(names(miRcount.runIdx), function(x) {y = subset(miRge.index, name %in% miRge.id.expanded[[x]]) %>% distinct(name.cleaned, .keep_all=T); sum(y$loci.num)==1})
+    cur.miRNA = data.frame(miRgeID = rownames(miRcount)[miRcount.runIdx[temp]])
+  
+    cur.bed = read.table(paste0(region, "-", race, "/eQTL/", tolower(region), "-", tolower(race), "_miRNA_expr.bed"), header=T, sep="\t", comment.char = "")
+    colnames(cur.bed)[1] = "chrom"
+    print(nrow(cur.miRNA) == nrow(cur.bed)) # confirmed! This is possible because we only chose single locus miRNA.
+    
+    # link miRge id to bed id (aka. eqtl_id)
+    temp = lapply(cur.miRNA$miRgeID, function(x) grep(paste0(x, "$"), cur.bed$gene_id))
+    print(all(sapply(temp, length)==1)) # link is successful!
+    cur.miRNA$bed.id = cur.bed$gene_id[unlist(temp)]
+    cur.miRNA = mutate(cur.miRNA, primary.id = gsub("_.*", "", bed.id)) %>% left_join(miRBase.coord[, c("primary.id", "chrom", "start", "end", "strand")], by="primary.id", multiple="first") # to get strand info, multiple="first" due to -5p and -3p in miRBase.coord
+    
+    # identify host
+    tempA = cur.miRNA
+    tempB = subset(gencode.gene.table, gene_type=="protein_coding" & get(paste0(tolower(region), "_", tolower(race), ".expressed")))
+    temp = findOverlaps(with(tempA, GRanges(chrom, IRanges(start, end), strand)), with(tempB, GRanges(chrom, IRanges(start, end), strand)), type="within")
+    cur.res = cbind(tempA[queryHits(temp), ], tempB[subjectHits(temp), c("gene_id", "gene_name")])
+    
+    # calculate correlation
+    cur.res$corr = sapply(1:nrow(cur.res), function(i) cor(miRcount.vst.lmCov5res[cur.res$miRgeID[i] ,cur.RNum.miRNA], mRNAcount.vst.lmCov5res[cur.res$gene_id[i], cur.RNum.mRNA]))
+    
+    miRqtl.all.host[[paste0(tolower(region), ".", tolower(race))]] = cur.res
+  }
+}
+
+miRqtl.all.host = do.call(rbind, miRqtl.all.host) 
+miRqtl.all.host = miRqtl.all.host %>% tibble::rownames_to_column("temp") %>% mutate(race=stringr::word(temp, 2, sep = "\\."), region=stringr::word(temp, 1, sep = "\\.")) %>% dplyr::select(race, region, everything()) %>% dplyr::select(-temp, -primary.id) # primary.id is redundant to bed.id.
+with(miRqtl.all.host, table(race, region))
+```
+
+# 3. Colocalization between miRqtl and eqtl
+
+
+Prepare emir-host pairs
+```{r}
+miRqtl.sig.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.sig.list.rds")
+
+miRqtl.emir = bind_rows(miRqtl.sig.list, .id="tissue") %>% mutate(region=sub("\\..*$", "", tissue), race=sub("^.*\\.", "", tissue)) %>% distinct(race, region, phenotype_id)
+
+miRqtl.emir.host = left_join(miRqtl.emir, dplyr::select(miRqtl.all.host, race, region, eqtl_id, gene_id, chrom), by=c("race", "region", "phenotype_id"="eqtl_id")) # relationship: one-to-many, to consider multiple hosts, but this didn't make any changes... no multiple host genes for a given miRNA... default relationship seems to handle any cases except for many-to-many. actually miRqtl.emir.host has a larger number of rows than miRqtl.emir!
+```
+
+> Note that miRqtl.emir.host does not include all miRqtl.emir because miRqtl.all.host retained only miRNA that are hosted by the "expressed" mRNA.
+
+Run colocalization
+```{r}
+miRqtl.sampleSheet.list = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/miRqtl.sampleSheet.list.rds")
+
+temp = list()
+for (bregion in c("DLPFC", "mPFC", "Hippo", "Caudate")) {
+  for (ancestry in c("CAUC", "AA")) {
+
+    baseDir = paste0(bregion, "-", ancestry, "/eQTL/")
+    file.prefix = paste0(tolower(bregion), "-", tolower(ancestry))
+    
+    temp[[file.prefix]] = runColoc(subset(miRqtl.emir.host, race==tolower(ancestry) & region==tolower(bregion) & !is.na(gene_id)), baseDir, file.prefix, nrow(miRqtl.sampleSheet.list[[paste0(tolower(region), ".", tolower(race))]])) # read tensorqtl parquet files for miRNA and mRNA, and genotypes, then run coloc.
+  }
+}
+
+miRqtl.emir.host = bind_rows(temp)
+miRqtl.emir.host$chrom = NULL
+any(is.na(miRqtl.emir.host$coloc.h4))
+with(miRqtl.emir.host, table(race, region))
+with(miRqtl.emir.host, table(coloc.h4>0.5, region, race))
+```
+
+Compare background vs colocalized emiR-host (signal)
+```{r}
+miRqtl.all.host = left_join(miRqtl.all.host, mutate(miRqtl.emir.host, emir=TRUE), by=c("race", "region", "eqtl_id"="phenotype_id", "gene_id"))
+miRqtl.all.host$emir[is.na(miRqtl.all.host$emir)] = FALSE
+
+# compare to all miRNA-host as background
+p = ggplot(miRqtl.all.host, aes(col=emir & coloc.h4>0.5, corr)) + facet_grid(race~region)
+p + stat_ecdf()
+
+# compare to emir as background
+p = ggplot(subset(miRqtl.all.host, emir), aes(col=coloc.h4>0.5, corr)) + facet_grid(race~region)
+p + stat_ecdf()
+
+# compare to emir vs the others
+p = ggplot(miRqtl.all.host, aes(col=emir, corr)) + facet_grid(race~region)
+p + stat_ecdf() # being emir is not enough to have more regulation.
+```
+
+# 4. Output
+```{r}
+miRqtl.host = miRqtl.all.host # Remind that miRqtl.all.host retained only miRNAs that are hosted by the "expressed" mRNA.
+
+save(miRqtl.host, file="~/HwangLab/taeyoungh/miRNA/Results/freeze082825_host.Rdata")
+```
+

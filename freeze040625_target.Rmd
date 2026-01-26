@@ -1,0 +1,280 @@
+---
+title: "miRNA target genes"
+output: html_document
+date: "2025-09-16"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = 1) # Warnings are printed immediately, not delayed (some packages delay warning printing).
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+source("~/Source/miRNA/miRNA_functions.R")
+
+library(org.Hs.eg.db)
+```
+
+```{r}
+setwd("/mnt/Data1/HwangLab/Arun/Adult_Freeze-040625/")
+```
+
+# 0. Annotation
+
+miRNA mapping
+```{r}
+load("0_Annot/miRNA_index.Rdata")
+miRge.id.expanded = count.id.expanded; rm(count.id.expanded)
+miRge.index = index.annot; rm(index.annot) # miRge alignment index
+miRge.index.seq = index.fa; rm(index.fa)
+miRBase.coord = hsa.gff.pair; rm(hsa.gff.pair)
+```
+
+Target DB
+```{r}
+mirdb = readRDS("/mnt/Data1/HwangLab/Arun/Adult_Freeze-040625/Annotation/miRNA_annot_mirdb.rds")
+dim(mirdb)
+```
+
+> score ≥ 80: High confidence that the target is real, score < 60: Requires caution and additional supporting evidence. 
+
+# 1. DE
+
+```{r}
+load("~/HwangLab/taeyoungh/miRNA/Results/freeze040625_DE.Rdata")
+```
+
+### mRNA background
+
+```{r}
+gencode.gene.table = readRDS("~/HwangLab/taeyoungh/miRNA/Adult_Freeze-082825/gencode.gene.table.rds")
+```
+
+```{r}
+mirdb = mutate(mirdb, de.dlpfc.expressed = gene_id %in% subset(gencode.gene.table, dlpfc_cauc.expressed & dlpfc_aa.expressed)$gene_id,
+               de.mpfc.expressed = gene_id %in% subset(gencode.gene.table, mpfc_cauc.expressed & mpfc_aa.expressed)$gene_id,
+               de.hippo.expressed = gene_id %in% subset(gencode.gene.table, hippo_cauc.expressed & hippo_aa.expressed)$gene_id,
+               de.caudate.expressed = gene_id %in% subset(gencode.gene.table, caudate_cauc.expressed & caudate_aa.expressed)$gene_id)
+
+mirdb = mutate(mirdb, de.pfc.expressed = gene_id %in% subset(gencode.gene.table, dlpfc_cauc.expressed & dlpfc_aa.expressed & mpfc_cauc.expressed & mpfc_aa.expressed)$gene_id)
+```
+
+### Region DE
+
+Link to miRBase
+```{r}
+# control background
+miRBase.coord$de.region.all = miRgeToMirBase(rownames(de.region.res), miRBase.coord$miRNA) # 3 are not mapped finally: hsa-miR-1973, hsa-miR-339, hsa-miR-378g
+miRBase.coord$de.region.sig = miRgeToMirBase(rownames(de.region.sig), miRBase.coord$miRNA)
+
+# region specific
+miRBase.coord$de.region.pfcSpecific = miRgeToMirBase(rownames(subset(de.region.sig, pfcSpecific>0.7)), miRBase.coord$miRNA)
+miRBase.coord$de.region.hippoSpecific = miRgeToMirBase(rownames(subset(de.region.sig, hippoSpecific>0.7)), miRBase.coord$miRNA)
+miRBase.coord$de.region.caudateSpecific = miRgeToMirBase(rownames(subset(de.region.sig, caudateSpecific>0.7)), miRBase.coord$miRNA)
+
+miRBase.coord$de.region.pfcSpecific2 = miRgeToMirBase(rownames(subset(de.region.sig, pfcSpecific2>1)), miRBase.coord$miRNA)
+miRBase.coord$de.region.hippoSpecific2 = miRgeToMirBase(c("hsa-miR-184", "hsa-miR-1911-5p", "hsa-miR-204-5p", "hsa-miR-4423-5p"), miRBase.coord$miRNA)
+miRBase.coord$de.region.caudateSpecific2 = miRgeToMirBase(rownames(subset(de.region.sig, caudateSpecific2>1)), miRBase.coord$miRNA)
+```
+
+Target identification
+```{r}
+mirdb = mutate(mirdb, de.region.all = mir_id %in% subset(miRBase.coord, de.region.all!="Not")$miRNA,
+               de.region.pfcSpecific = mir_id %in% subset(miRBase.coord, de.region.pfcSpecific!="Not")$miRNA,
+               de.region.hippoSpecific = mir_id %in% subset(miRBase.coord, de.region.hippoSpecific!="Not")$miRNA,
+               de.region.caudateSpecific = mir_id %in% subset(miRBase.coord, de.region.caudateSpecific!="Not")$miRNA)
+
+mirdb = mutate(mirdb, de.region.pfcSpecific2 = mir_id %in% subset(miRBase.coord, de.region.pfcSpecific2!="Not")$miRNA,
+               de.region.hippoSpecific2 = mir_id %in% subset(miRBase.coord, de.region.hippoSpecific2!="Not")$miRNA,
+               de.region.caudateSpecific2 = mir_id %in% subset(miRBase.coord, de.region.caudateSpecific2!="Not")$miRNA)
+```
+
+GO
+```{r}
+de.region.go = list()
+
+de.region.go[["all"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.region.all & (de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed) & score>80)$gene_id2), universe = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+
+clusterProfiler::dotplot(de.region.go[["all"]])
+```
+
+```{r}
+de.region.go[["pfcSpecific2"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.pfc.expressed & de.region.pfcSpecific2 & score>80)$gene_id2), universe = unique(subset(mirdb, de.pfc.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+
+clusterProfiler::dotplot(de.region.go[["pfcSpecific2"]])
+
+de.region.go[["hippoSpecific2"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.hippo.expressed & de.region.hippoSpecific2 & score>80)$gene_id2), universe = unique(subset(mirdb, de.hippo.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+
+clusterProfiler::dotplot(de.region.go[["hippoSpecific2"]])
+
+de.region.go[["caudateSpecific2"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.caudate.expressed & de.region.caudateSpecific2 & score>80)$gene_id2), universe = unique(subset(mirdb, de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+
+clusterProfiler::dotplot(de.region.go[["caudateSpecific2"]])
+```
+
+> caudate is close to subventricular zone (SVZ)...
+
+### Race DE
+
+Link to miRBase
+```{r}
+miRBase.coord$de.race.all = miRgeToMirBase(subset(de.race.res, region=="all")$mirgeID, miRBase.coord$miRNA)
+miRBase.coord$de.race.sig = miRgeToMirBase(subset(de.race.sig, region=="all")$mirgeID, miRBase.coord$miRNA)
+
+miRBase.coord$de.race.up = miRgeToMirBase(subset(de.race.sig, region=="all" & log2FoldChange>0.2)$mirgeID, miRBase.coord$miRNA) # aa > cauc
+miRBase.coord$de.race.down = miRgeToMirBase(subset(de.race.sig, region=="all" & log2FoldChange<(-0.2))$mirgeID, miRBase.coord$miRNA) # aa < cauc
+```
+
+Target identification
+```{r}
+#mirdb = mutate(mirdb, de.race.dlpfc = mir_id %in% subset(miRBase.coord, de.race.dlpfc!="Not")$miRNA,
+#               de.race.mpfc = mir_id %in% subset(miRBase.coord, de.race.mpfc!="Not")$miRNA,
+#               de.race.hippo = mir_id %in% subset(miRBase.coord, de.race.hippo!="Not")$miRNA,
+#               de.race.caudate = mir_id %in% subset(miRBase.coord, de.race.caudate!="Not")$miRNA)
+
+mirdb = mutate(mirdb, de.race.up = mir_id %in% subset(miRBase.coord, de.race.up!="Not")$miRNA,
+               de.race.down = mir_id %in% subset(miRBase.coord, de.race.down!="Not")$miRNA)
+```
+
+GO
+```{r}
+de.race.go = list()
+# de.race.go[["dlpfc"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.dlpfc.expressed & de.race.dlpfc & score>=80)$gene_id2), universe = unique(subset(mirdb, de.dlpfc.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+# 
+# clusterProfiler::dotplot(de.race.go[["dlpfc"]])
+# 
+# de.race.go[["caudate"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.caudate.expressed & de.race.caudate & score>=80)$gene_id2), universe = unique(subset(mirdb, de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+# 
+# clusterProfiler::dotplot(de.race.go[["caudate"]])
+# 
+# de.race.go[["hippo"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.hippo.expressed & de.race.hippo & score>=80)$gene_id2), universe = unique(subset(mirdb, de.hippo.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+# 
+# clusterProfiler::dotplot(de.race.go[["hippo"]])
+# 
+# de.race.go[["mpfc"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.mpfc.expressed & de.race.mpfc & score>=80)$gene_id2), universe = unique(subset(mirdb, de.mpfc.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+# 
+# clusterProfiler::dotplot(de.race.go[["mpfc"]])
+```
+
+```{r}
+de.race.go[["up"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed & de.race.up & score>=80)$gene_id2), universe = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+
+clusterProfiler::dotplot(de.race.go[["up"]])
+
+de.race.go[["down"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed & de.race.down & score>=80)$gene_id2), universe = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+
+clusterProfiler::dotplot(de.race.go[["down"]])
+```
+
+### Significant terms
+```{r}
+de.regionSpecific.go.sig = list()
+for (region in c("pfcSpecific2", "hippoSpecific2", "caudateSpecific2")) {
+  de.regionSpecific.go.sig[[region]] = de.region.go[[region]]@result %>% mutate(geneRatio = parse_ratio(GeneRatio)) %>% dplyr::select(ID, Description, qvalue, geneRatio) %>% filter(qvalue<0.05)
+}
+
+de.regionSpecific.go.sig = do.call(rbind, de.regionSpecific.go.sig) 
+de.regionSpecific.go.sig = de.regionSpecific.go.sig %>% tibble::rownames_to_column("temp") %>% mutate(region=stringr::word(temp, 1, sep = "\\.")) %>% dplyr::select(region, everything()) %>% dplyr::select(-temp)
+
+with(de.regionSpecific.go.sig, table(region))
+summary(de.regionSpecific.go.sig$geneRatio)
+```
+
+```{r}
+de.race.go.sig = list()
+for (region in c("up", "down")) {
+  de.race.go.sig[[region]] = de.race.go[[region]]@result %>% mutate(geneRatio = parse_ratio(GeneRatio)) %>% dplyr::select(ID, Description, qvalue, geneRatio) %>% filter(qvalue<0.05)
+}
+
+de.race.go.sig = do.call(rbind, de.race.go.sig) 
+de.race.go.sig = de.race.go.sig %>% tibble::rownames_to_column("temp") %>% mutate(region=stringr::word(temp, 1, sep = "\\.")) %>% dplyr::select(region, everything()) %>% dplyr::select(-temp)
+
+with(de.race.go.sig, table(region))
+summary(de.race.go.sig$geneRatio)
+```
+
+qvalue Plot
+```{r}
+de.regionSpecific.go.sig.qval = dcast(subset(de.regionSpecific.go.sig, geneRatio>0.05), Description~region, value.var = "qvalue") %>% tibble::column_to_rownames("Description")
+
+de.regionSpecific.go.sig.qval = -log10(de.regionSpecific.go.sig.qval)
+
+# all
+temp = de.regionSpecific.go.sig.qval
+temp[is.na(temp)] = -1
+pheatmap::pheatmap(temp)
+
+# common pathways
+temp = de.regionSpecific.go.sig.qval[rowSums(is.na(de.regionSpecific.go.sig.qval))==0,]
+dim(temp)
+pheatmap::pheatmap(temp)
+
+# region-specific
+temp = de.regionSpecific.go.sig.qval[rowSums(is.na(de.regionSpecific.go.sig.qval))>0 & rowSums(is.na(de.regionSpecific.go.sig.qval))<3 ,]
+temp[is.na(temp)] = -1
+pheatmap::pheatmap(temp)
+```
+
+```{r}
+de.race.go.sig.qval = dcast(subset(de.race.go.sig, geneRatio>0.05), Description~region, value.var = "qvalue") %>% tibble::column_to_rownames("Description")
+
+de.race.go.sig.qval = -log10(de.race.go.sig.qval)
+
+# all
+temp = de.race.go.sig.qval
+temp[is.na(temp)] = -1
+pheatmap::pheatmap(temp)
+
+# common pathways
+temp = de.race.go.sig.qval[rowSums(is.na(de.race.go.sig.qval))==0,]
+dim(temp)
+pheatmap::pheatmap(temp)
+```
+
+# 2. eQTL
+
+```{r}
+load("~/HwangLab/taeyoungh/miRNA/Results/freeze082825_eQTL.Rdata")
+
+miRqtl.mash.cauc.sig.large = miRqtl.mash.cauc.sig[apply(abs(miRqtl.mash.res[miRqtl.mash.cauc.sig, c("dlpfc.cauc_beta", "mpfc.cauc_beta", "hippo.cauc_beta", "caudate.cauc_beta")]), 1, max)>0.5]
+miRqtl.mash.aa.sig.large = miRqtl.mash.aa.sig[apply(abs(miRqtl.mash.res[miRqtl.mash.aa.sig, c("dlpfc.aa_beta", "mpfc.aa_beta", "hippo.aa_beta", "caudate.aa_beta")]), 1, max)>0.5]
+```
+
+Link to miRBase
+```{r}
+miRBase.coord$miRqtl.mash.cauc.sig.large = miRgeToMirBase(sub(".*_", "", miRqtl.mash.cauc.sig.large), miRBase.coord$miRNA)
+miRBase.coord$miRqtl.mash.aa.sig.large = miRgeToMirBase(sub(".*_", "", miRqtl.mash.aa.sig.large), miRBase.coord$miRNA)
+```
+
+Target identification
+```{r}
+mirdb = mutate(mirdb, 
+               miRqtl.mash.cauc.sig.large = mir_id %in% miRBase.coord$miRqtl.mash.cauc.sig.large,
+               miRqtl.mash.aa.sig.large = mir_id %in% miRBase.coord$miRqtl.mash.aa.sig.large)
+```
+
+GO
+```{r}
+miRqtl.go = list()
+
+miRqtl.go[["cauc"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed & miRqtl.mash.cauc.sig.large & score>=80)$gene_id2), universe = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+ 
+clusterProfiler::dotplot(miRqtl.go[["cauc"]])
+
+miRqtl.go[["aa"]] = clusterProfiler::enrichGO(gene = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed & miRqtl.mash.aa.sig.large & score>=80)$gene_id2), universe = unique(subset(mirdb, de.dlpfc.expressed & de.mpfc.expressed & de.hippo.expressed & de.caudate.expressed)$gene_id2), keyType = "ENSEMBL", OrgDb = org.Hs.eg.db, ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05, readable = TRUE)
+ 
+clusterProfiler::dotplot(miRqtl.go[["aa"]])
+```
+
+# Save
+```{r}
+save(miRBase.coord, mirdb, de.region.go, de.race.go, miRqtl.go, file="~/HwangLab/taeyoungh/miRNA/Results/freeze040625_target.Rdata")
+```
+
+
+
