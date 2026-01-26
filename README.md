@@ -3,7 +3,7 @@
 1. Differential expression analysis: freeze082825_DE.Rmd
 
 2. eQTL analysis: freeze082825_eQTL.Rmd
-Initial eQTL was done with TensorQTL.
+* Initial eQTL was done with TensorQTL.
 
 4. miRNA-host analysis: freeze082825_host_cleaned.Rmd
 
