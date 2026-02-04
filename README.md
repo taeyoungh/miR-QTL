@@ -12,7 +12,7 @@
 
 ## 4. TWAS
 `freeze082825_TWAS.Rmd`
-* Initial Fusion analysis was performed as described in https://github.com/arunhpatil/miRQTL/blob/main/TWAS/tutorial.md
+* Initial Fusion, SMR, and HEIDI analyses were performed as described in https://github.com/arunhpatil/miRQTL/blob/main/TWAS/tutorial.md
 
 ## 5. miRNA target analysis
 `freeze040625_target.Rmd`
