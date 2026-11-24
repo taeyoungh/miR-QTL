@@ -1,0 +1,512 @@
+---
+title: "miRNA manuscript code"
+output: html_document
+date: "2026-11-4"
+editor_options: 
+  chunk_output_type: console
+---
+
+Unless otherwise specified, the following code was copied from (internal) manscript_draft.Rmd and manuscript_revision.Rmd.
+
+```{r setup, include=FALSE}
+options(warn = 1) # Warnings are printed immediately (some packages delay warning printing).
+```
+
+```{r}
+library(dplyr)
+library(reshape2)
+
+library(ggplot2)
+library(ggpubr)
+```
+
+# 1. Main data
+```{r}
+# Sample sheet, count matrix, expression residual except for brain region
+load("~/HwangLab/taeyoungh/miRNA/Manuscript/Github/main_data.Rdata")
+nrow(sampleSheet) # 995
+dim(miRcount) # 1481 * 995
+
+stopifnot(all(sampleSheet$RNum_miRNA == colnames(miRcount)))
+```
+
+### Suppl. Fig 1B
+```{r}
+# Update miRNA number based on count>0. 
+sampleSheet$miRnum = apply(miRcount, 2, function(x) length(x[x>0]))
+
+p = ggviolin(sampleSheet, x="BrainRegion", y="miRnum", fill="Race", add = "mean_sd", width=0.8)
+p = p + xlab("Brain Region") + ylab("The number of detected miRNAs")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p = p + theme(axis.title=element_text(size=20), axis.text=element_text(size=20), legend.title=element_text(size=15), legend.text=element_text(size=15))
+p
+```
+
+# 2. DE
+
+The following code was copied from freeze082825_DE_revision.Rmd
+
+```{r}
+library(edgeR)
+library(variancePartition)
+#library(BiocParallel)
+```
+
+#### Brain Region
+```{r}
+# Design and contrast
+region.design <- ~ RIN + miRcountLog + Sex + Race + PrimaryDx + BrainRegion + (1 | BrNum)  # Random intercept only. With just 3 samples per subject, a random slope for region (BrainRegion | Subject) will usually fail to converge...
+
+# Contrasts must be passed to dream() at fit time via L.
+# Dream automatically appends all univariate contrasts: make additional contrasts to calculate all pairwise region comparisons. 
+region.contr <- setNames(c("BrainRegionHIPPO - BrainRegionmPFC", "BrainRegionHIPPO - BrainRegionCaudate", "BrainRegionmPFC - BrainRegionCaudate"), c("HIPPO_vs_mPFC", "HIPPO_vs_Caudate", "mPFC_vs_Caudate"))
+
+L <- makeContrastsDream(region.design, sampleSheet, contrasts = region.contr)
+plotContrasts(L) # sanity-check the +1/-1 encoding
+
+# Fit and moderate s.d.
+region.fit <- dream(miRcount.vst, region.design, tibble::column_to_rownames(sampleSheet, "RNum_miRNA"), L = L) # dream assumes y follows normal distribution...
+region.fit <- eBayes(region.fit)
+
+# Test
+colnames(region.fit)
+region.res <- topTable(region.fit, coef = c("BrainRegionHIPPO", "BrainRegionmPFC", "BrainRegionCaudate"), number = Inf, sort.by = "none") # differences across regions
+hist(region.res$P.Value)
+table(region.res$adj.P.Val<0.01) # 911
+```
+
+effect size
+```{r}
+# mean expression in each brain region
+for (r in c("DLPFC", "mPFC", "HIPPO", "Caudate")) {
+  region.res[,r] = rowMeans(miRcount.vst.lmCov5res[, subset(sampleSheet, BrainRegion == r)$RNum_miRNA])
+}
+
+# find lowest and highest regions for every miRNA
+region.res$lowest.tissue = c("DLPFC", "mPFC", "HIPPO", "Caudate")[apply(region.res[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], 1, which.min)]
+region.res$highest.tissue = c("DLPFC", "mPFC", "HIPPO", "Caudate")[apply(region.res[, c("DLPFC", "mPFC", "HIPPO", "Caudate")], 1, which.max)]
+
+# calculate max diff. among pairwise comparisons.
+temp = as.matrix(region.res[,c("DLPFC", "mPFC", "HIPPO", "Caudate")]) # get a "matrix" for subsetting.
+region.res$maxDiff = temp[cbind(1:nrow(temp), match(region.res$highest.tissue, colnames(temp)))]-temp[cbind(1:nrow(temp), match(region.res$lowest.tissue, colnames(temp)))]
+```
+
+significant miRNAs
+```{r}
+with(region.res, table(adj.P.Val<0.01 & maxDiff>0.5)) # 67
+
+# Fig. 1B
+temp = subset(region.res, adj.P.Val<0.01 & maxDiff>0.5)  %>% dplyr::select(DLPFC, mPFC, HIPPO, Caudate)
+
+pheatmap::pheatmap(temp, scale = "row", cluster_cols = F, fontsize_row = 6, width=7, height=6)
+```
+
+Region specificity
+```{r}
+cohen_d2 <- function(x, group_labels, target_group) { # target group vs second highest group
+  
+  group_means = data.frame(value = x, group = group_labels) %>% group_by(group) %>% summarise(mean_value = mean(value, na.rm = TRUE))
+  
+  cont_group = as.character(group_means$group[which(order(group_means$mean_value, decreasing = T)==2)])
+  
+  x_target <- x[group_labels %in% target_group]
+  x_cont   <- x[group_labels %in% cont_group]
+  
+  n1 <- length(x_target)
+  n2 <- length(x_cont)
+  
+  mean1 <- mean(x_target, na.rm = TRUE)
+  mean2 <- mean(x_cont, na.rm = TRUE)
+  
+  # Pooled SD
+  sd1 <- sd(x_target, na.rm = TRUE)
+  sd2 <- sd(x_cont, na.rm = TRUE)
+  s_pooled <- sqrt(((n1 - 1)*sd1^2 + (n2 - 1)*sd2^2) / (n1 + n2 - 2))
+  
+  d <- (mean1 - mean2) / s_pooled
+  return(d)
+}
+
+# cohen_d2
+region.res$pfcSpecific2=sapply(rownames(region.res), function(x) {cohen_d2(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, c("DLPFC", "mPFC"))})
+
+region.res$hippoSpecific2=sapply(rownames(region.res), function(x) {cohen_d2(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, "HIPPO")})
+
+region.res$caudateSpecific2=sapply(rownames(region.res), function(x) {cohen_d2(miRcount.vst.lmCov5res[x,], sampleSheet$BrainRegion, "Caudate")})
+```
+
+#### Ethnicity
+
+white vs. Black
+```{r}
+# N
+table(sampleSheet$Race) # AA: 493, CAUC: 502
+
+# DE design
+race.design <- ~ RIN + miRcountLog + Sex + PrimaryDx + BrainRegion + Race + (1 | BrNum) 
+
+# Fit and moderate
+race.fit <- dream(miRcount.vst, race.design, tibble::column_to_rownames(sampleSheet, "RNum_miRNA"))
+race.fit <- eBayes(race.fit)
+
+# Test
+colnames(race.fit)
+race.res <- topTable(race.fit, coef = "RaceCAUC", number = Inf, sort.by = "none") 
+hist(race.res$P.Value)
+table(race.res$adj.P.Val<0.01) # 56
+```
+
+Continuous ancestry in Black
+```{r}
+# AA only 
+tempSheet = subset(sampleSheet, Race=="AA")
+rownames(tempSheet) = NULL
+
+# N
+nrow(tempSheet)
+
+# DE design
+race.design <- ~ RIN + miRcountLog + Sex + PrimaryDx + BrainRegion + ancestry.Afr + (1 | BrNum) 
+
+# Fit and moderate
+race.ancestry.fit <- dream(miRcount.vst[, tempSheet$RNum_miRNA], race.design, tibble::column_to_rownames(tempSheet, "RNum_miRNA"))
+
+race.ancestry.fit <- eBayes(race.ancestry.fit)
+
+# Test
+colnames(race.ancestry.fit)
+race.ancestry.res <- topTable(race.ancestry.fit, coef = "ancestry.Afr", number = Inf, sort.by = "none") 
+```
+
+Comparison between donor group-based and Black-continuous ancestry
+```{r}
+# Suppl. Figure 3C 
+de.race = left_join(race.res %>% tibble::rownames_to_column("miRgeID"), race.ancestry.res %>% rename_with(~ paste0(.x, "_ancestry")) %>% tibble::rownames_to_column("miRgeID"), by=c("miRgeID"))
+
+temp = subset(de.race, adj.P.Val<0.01)
+nrow(temp) # 56
+
+p = ggplot(temp, aes(x=-1*logFC, y=logFC_ancestry))
+p = p + geom_point() + geom_smooth()
+p = p + xlab("FC between EUR vs. AFR") + ylab("FC across AFR ancestry % in AFR")
+p = p + labs_pubr() + cowplot::background_grid()
+p = p + theme(axis.title=element_text(size=25), axis.text=element_text(size=25))
+p
+```
+
+#### Control vs. SCZ
+
+```{r}
+tempSheet = subset(sampleSheet, PrimaryDx %in% c("Control", "Schizo"))
+nrow(tempSheet) # 838
+rownames(tempSheet)=NULL
+
+# DE design
+scz.design <- ~ RIN + miRcountLog + Sex + BrainRegion + Race + PrimaryDx + (1 | BrNum) 
+
+# Fit and moderate
+scz.fit <- dream(miRcount.vst[, tempSheet$RNum_miRNA], scz.design, tibble::column_to_rownames(tempSheet, "RNum_miRNA"), BPPARAM = SnowParam(4, "SOCK"))
+
+scz.fit <- eBayes(scz.fit)
+
+# Test
+colnames(scz.fit)
+scz.res <- topTable(scz.fit, coef = "PrimaryDxSchizo", number = Inf, sort.by = "none") 
+hist(scz.res$P.Value)
+```
+
+#### DLPFC 3 disorders
+```{r}
+tempSheet = subset(sampleSheet, BrainRegion=="DLPFC")
+nrow(tempSheet) # 360
+rownames(tempSheet)=NULL
+
+# DE design (no random effect, equivalent to limma lmFit)
+dlpfcDisease.design <- ~ RIN + miRcountLog + Sex + Race + PrimaryDx
+
+dlpfcDisease.contr <- setNames(c("PrimaryDxSchizo - PrimaryDxBipolar", "PrimaryDxSchizo - PrimaryDxMDD", "PrimaryDxBipolar - PrimaryDxMDD"), c("Schizo_vs_Bipolar", "Schizo_vs_MDD", "Bipolar_vs_MDD"))
+
+L <- makeContrastsDream(dlpfcDisease.design, tempSheet, contrasts = dlpfcDisease.contr)
+plotContrasts(L)
+
+# Fit and moderate
+dlpfcDisease.fit <- dream(miRcount.vst[, tempSheet$RNum_miRNA], dlpfcDisease.design, tibble::column_to_rownames(tempSheet, "RNum_miRNA"), L = L)
+
+dlpfcDisease.fit <- eBayes(dlpfcDisease.fit)
+
+# Test
+colnames(dlpfcDisease.fit)
+dlpfcDisease.res <- topTable(dlpfcDisease.fit, coef = c("PrimaryDxSchizo","PrimaryDxBipolar", "PrimaryDxMDD"), number = Inf, sort.by = "none") 
+hist(dlpfcDisease.res$P.Value)
+table(dlpfcDisease.res$adj.P.Val<0.01) # 17
+
+# Pair-wise log2FC
+temp <- lapply(c("PrimaryDxSchizo", "PrimaryDxBipolar", "PrimaryDxMDD", names(dlpfcDisease.contr)), function(cf) { topTable(dlpfcDisease.fit, coef = cf, number = Inf, sort.by = "none") })
+
+dlpfcDisease.log2fc <- purrr::map(temp, "logFC") %>% bind_cols()
+colnames(dlpfcDisease.log2fc) = c("Schizo_vs_DLPFC", "Bipolar_vs_DLPFC", "MDD_vs_DLPFC", names(dlpfcDisease.contr))
+
+# absolute max of log2FC
+dlpfcDisease.res$logFC <- apply(dlpfcDisease.log2fc, 1, function(x) x[which.max(abs(x))])
+```
+
+### Examples
+```{r}
+# Suppl. Fig 2B,D,F
+p.miRNA = "hsa-miR-124-5p" # PFC
+p.miRNA = "hsa-miR-184" # HIPPO
+p.miRNA = "hsa-miR-552-5p" # Caudate
+
+# Suppl. Fig 3A, B
+p.miRNA = "hsa-miR-1299" 
+p.miRNA = "hsa-miR-424-3p" 
+
+temp = data.frame(sampleSheet, expr=miRcount.vst[p.miRNA, ])
+temp$Ancestry = factor(temp$Race, levels=c("AA", "CAUC"), labels=c("AFR", "EUR"))
+
+p = ggpubr::ggboxplot(temp, x="BrainRegion", y="expr", add="jitter", col="Ancestry", add.params=list(alpha=0.8))
+p = p + theme(legend.position="right")
+p = p + ylab("Normalized expression") + xlab("Brain region")
+p + ggtitle(p.miRNA)
+```
+
+# 3. miR-QTL
+
+See details in freeze082825_eQTL.Rmd
+
+### tensorQTL
+```{r}
+# miRNA results
+load("~/HwangLab/taeyoungh/miRNA/Manuscript/Github/miRqtl_results.Rdata")
+
+# eQTL results
+load("~/HwangLab/taeyoungh/miRNA/Manuscript/Github/eqtl_results.Rdata") # eqtl.sig.lead.pve
+
+# Summary table
+miRqtl.emir.stat = data.frame(perm=sapply(miRqtl.perm.list, function(x) {length(unique(subset(x, qval<0.05)$phenotype_id))}),
+                              nominal=sapply(miRqtl.sig.list, function(x) {length(unique(x$phenotype_id))}))
+
+# sample size
+temp = sapply(miRqtl.sampleSheet.list, nrow)
+all(rownames(miRqtl.emir.stat) == names(temp)) # confirm consistency in order.
+miRqtl.emir.stat$N = temp
+
+# Fig. 2A: emiR number
+temp = rownames(miRqtl.emir.stat)
+miRqtl.emir.stat = mutate(miRqtl.emir.stat, Region = factor(sub("\\..*$", "", temp), levels=c("dlpfc", "mpfc", "hippo", "caudate"), labels=c("DLPFC", "mPFC", "HIPPO", "Caudate")), Race = factor(sub(".*\\.", "", temp), levels = c("cauc", "aa"), labels=c("CAUC", "AA")))
+
+p = ggbarplot(miRqtl.emir.stat, x = "Region", y = "nominal",
+          fill = "Race",               # change fill color by cyl
+          color = "white",            # Set bar border colors to white
+          palette = "jco",            # jco journal color palett. see ?ggpar
+          position = position_dodge(0.8), # side-by-side
+          )
+p = p + xlab("Region") + ylab("The number of eMiR")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p = p + theme(axis.title=element_text(size=15), axis.text=element_text(size=15), legend.title=element_text(size=13), legend.text=element_text(size=13))
+p
+
+# Suppl. Figure 5A (sample size vs. nominal-based emiR number)
+p = ggplot(miRqtl.emir.stat, aes(x=N, y=nominal))
+p = p + geom_point(aes(col=Race, shape=Region), size=3) + geom_smooth(method="lm")
+p = p + xlab("Sample size") + ylab("The number of emiR")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p = p + theme(axis.title=element_text(size=15), axis.text=element_text(size=15), legend.title=element_text(size=13), legend.text=element_text(size=13))
+p
+
+# Suppl. Figure 5B (sample size vs. permutation-based emiR number)
+p = ggplot(miRqtl.emir.stat, aes(x=N, y=perm))
+p = p + geom_point(aes(col=Race, shape=Region), size=3) + geom_smooth(method="lm")
+p = p + xlab("Sample size") + ylab("The number of emiR")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p = p + theme(axis.title=element_text(size=15), axis.text=element_text(size=15), legend.title=element_text(size=13), legend.text=element_text(size=13))
+p
+
+# Fig. 2B (PVE: white)
+temp = rbind(mutate(miRqtl.sig.lead.pve, gene_type="miRNA"), subset(eqtl.sig.lead.pve, gene_type %in% c("protein_coding", "lincRNA")))
+
+temp$BrainRegion = factor(temp$BrainRegion, levels=c("dlpfc", "mpfc", "hippo", "caudate"), labels=c("DLPFC", "mPFC", "Hippocampus", "Caudate"))
+temp$Race = factor(temp$Race, levels=c("cauc", "aa"), labels=c("CAUC", "AA"))
+
+p = ggplot(subset(temp, Race=="CAUC"), aes(x=BrainRegion, fill=gene_type, y=pve*100, col=gene_type))
+p = p + geom_boxplot()
+p = p + ylim(0, 60)
+p = p + ylab("Proportion of Variance Explained by Genotype (%)") + xlab("Brain region")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p
+
+# Suppl. Fig. 7A (PVE: Black)
+p = ggplot(subset(temp, Race=="AA"), aes(x=BrainRegion, fill=gene_type, y=pve*100, col=gene_type))
+p = p + geom_boxplot()
+p = p + ylim(0, 60)
+p = p + ylab("Proportion of Variance Explained by Genotype (%)") + xlab("Brain region")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p
+```
+
+### GCTA
+```{r}
+load("~/HwangLab/taeyoungh/miRNA/Manuscript/Github/gcta_results.Rdata")
+
+temp = rbind(mutate(miRqtl.gcta.sig, gene_type="miRNA"), subset(eqtl.gcta.sig, gene_type %in% c("protein_coding", "lincRNA")))
+temp$Region = factor(temp$Region, levels=c("DLPFC", "mPFC", "Hippo", "Caudate"))
+temp$Race = factor(temp$Race, levels=c("CAUC", "AA"))
+
+# Fig. 2C
+p = ggviolin(subset(temp, Race=="CAUC" & Region=="DLPFC"), x = "gene_type", y = "Heritability", fill="gene_type")
+p = p + stat_compare_means(comparisons = list( c("miRNA", "protein_coding"), c("protein_coding", "lincRNA"), c("miRNA", "lincRNA")), size=5)
+p = p + xlab("Gene type") + ylab("GCTA heritability")
+p = p + theme(legend.position="none") + labs_pubr() + cowplot::background_grid()
+p
+
+# Suppl. Fig. 7B
+p = ggviolin(temp, x = "gene_type", y = "Heritability", fill="gene_type") + facet_grid(Race~Region)
+p = p + stat_compare_means(comparisons = list( c("miRNA", "protein_coding"), c("protein_coding", "lincRNA"), c("miRNA", "lincRNA")), size=4)
+p = p + xlab("Gene type") + ylab("GCTA heritability")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p
+```
+
+### MAF
+
+```{r}
+dim(miRqtl.sig.maf)
+with(miRqtl.sig.maf, table(tissue, race))
+
+# Fig. 2D
+miRqtl.sig.maf = miRqtl.sig.maf %>% mutate(Region = factor(tissue, levels=c("DLPFC", "mPFC", "Hippo", "Caudate")), Ancestry = factor(race, levels=c("CAUC", "AA", "Both"), labels=c("EUR-only", "AFR-only", "Both")))
+
+p = ggplot(subset(miRqtl.sig.maf, Region=="DLPFC"), aes(maf_cauc, col=Ancestry))
+p = p + stat_ecdf(linewidth=1.5)
+p = p + xlab("MAF in EUR ancestry") + ylab("Cumulative density")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p
+
+with(subset(miRqtl.sig.maf, Region=="DLPFC"), table(Race)) %>% prop.table()
+```
+
+### MASH
+> MASH was done with the R package mashr. See details in the methods and the mash part in freeze082825_eQTL.Rmd
+
+# 4. Annotation
+
+```{r}
+load("~/HwangLab/taeyoungh/miRNA/Manuscript/Github/annotation.Rdata")
+```
+
+### Roadmap Brain chromHMM
+
+This code was copied from freeze082825_enrichment.Rmd
+
+```{r}
+# intersection
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    temp = miRqtl.lead.list[[paste0(region, ".", race)]][ ,c("variant_chrom", "variant_pos")] %>% mutate(chrom=paste0("chr", variant_chrom), start=variant_pos, end=variant_pos) %>% dplyr::select(chrom, start, end) %>% as("GRanges")
+    
+    for (i in 1:nrow(chromhmm.table)) {
+      miRqtl.lead.list[[paste0(region, ".", race)]][[paste0("chromhmm.", chromhmm.table$Annotation[i])]] = temp %over% subset(chromhmm, name==chromhmm.table$Annotation[i])
+    }
+  }
+}
+
+# test
+miRqtl.lead.enrich.chromhmm = list()
+
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    miRqtl.lead.enrich.chromhmm[[paste0(region, ".", race)]] = data.frame(BrainRegion=region, Race=race, Type=chromhmm.table$Annotation, enrich_est=rep(NA, nrow(chromhmm.table)), enrich_pval=rep(NA, nrow(chromhmm.table)))
+
+    for (i in 1:nrow(chromhmm.table)) {
+      temp = glm(sig ~ get(paste0("chromhmm.", chromhmm.table$Annotation[i])) + factor(maf_group), data = mutate(miRqtl.lead.list[[paste0(region, ".", race)]], sig=fdr<0.05, maf_group=cut(maf, breaks = c(0, 0.1, 0.2, 0.5))), family = binomial) %>% summary() # logistic regression
+      miRqtl.lead.enrich.chromhmm[[paste0(region, ".", race)]][i, c(4,5)] = temp$coefficients[2,c(1,4)]
+    }
+  }
+}
+
+miRqtl.lead.enrich.chromhmm = do.call(rbind, miRqtl.lead.enrich.chromhmm)
+
+# heatmap
+temp = mutate(subset(miRqtl.lead.enrich.chromhmm, Race=="CAUC"), y=-log10(enrich_pval)) %>% dcast(., BrainRegion~Type, value.var = "y") %>% tibble::column_to_rownames("BrainRegion")
+
+pheatmap::pheatmap(temp, cluster_rows = F, cluster_cols = F, fontsize_row = 11, fontsize_col = 11, width=7, height=5)
+```
+
+### Brain cell-type enhancer
+
+This code was copied from freeze082825_enrichment.Rmd
+
+```{r}
+# intersection
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    temp = miRqtl.lead.list[[paste0(region, ".", race)]][ ,c("variant_chrom", "variant_pos")] %>% mutate(chrom=paste0("chr", variant_chrom), start=variant_pos-1, end=variant_pos) %>% dplyr::select(chrom, start, end) %>% as("GRanges")
+    
+    miRqtl.lead.list[[paste0(region, ".", race)]]$enhancer.neuron = temp %over% nott.enhancer[["neuron"]]
+    miRqtl.lead.list[[paste0(region, ".", race)]]$enhancer.oligo = temp %over% nott.enhancer[["oligo"]]
+    miRqtl.lead.list[[paste0(region, ".", race)]]$enhancer.lhx2 = temp %over% nott.enhancer[["lhx2"]]
+    miRqtl.lead.list[[paste0(region, ".", race)]]$enhancer.pu1 = temp %over% nott.enhancer[["pu1"]]
+  }
+}
+
+# enrichment test
+miRqtl.lead.enrich.enhancer = list()
+
+for (region in c("dlpfc", "mpfc", "hippo", "caudate")) {
+  for (race in c("cauc", "aa")) {
+    miRqtl.lead.enrich.enhancer[[paste0(region, ".", race)]] = data.frame(BrainRegion=region, Race=race, Type=c("Neuron", "Oligo", "LHX2", "PU1"), enrich_est=c(NA, NA, NA, NA), enrich_pval=c(NA, NA, NA, NA))
+    
+    temp = glm(sig ~ enhancer.neuron + factor(maf_group), data = mutate(miRqtl.lead.list[[paste0(region, ".", race)]], sig=fdr<0.05, maf_group=cut(maf, breaks = c(0, 0.1, 0.2, 0.5))), family = binomial) %>% summary() # logistic regression
+    miRqtl.lead.enrich.enhancer[[paste0(region, ".", race)]][1, c(4,5)] = temp$coefficients[2,c(1,4)]
+    
+    temp = glm(sig ~ enhancer.oligo + factor(maf_group), data = mutate(miRqtl.lead.list[[paste0(region, ".", race)]], sig=fdr<0.05, maf_group=cut(maf, breaks = c(0, 0.1, 0.2, 0.5))), family = binomial) %>% summary()
+    miRqtl.lead.enrich.enhancer[[paste0(region, ".", race)]][2, c(4,5)] = temp$coefficients[2,c(1,4)]
+    
+    temp = glm(sig ~ enhancer.lhx2 + factor(maf_group), data = mutate(miRqtl.lead.list[[paste0(region, ".", race)]], sig=fdr<0.05, maf_group=cut(maf, breaks = c(0, 0.1, 0.2, 0.5))), family = binomial) %>% summary()
+    miRqtl.lead.enrich.enhancer[[paste0(region, ".", race)]][3, c(4,5)] = temp$coefficients[2,c(1,4)]
+    
+    temp = glm(sig ~ enhancer.pu1 + factor(maf_group), data = mutate(miRqtl.lead.list[[paste0(region, ".", race)]], sig=fdr<0.05, maf_group=cut(maf, breaks = c(0, 0.1, 0.2, 0.5))), family = binomial) %>% summary()
+    miRqtl.lead.enrich.enhancer[[paste0(region, ".", race)]][4, c(4,5)] = temp$coefficients[2,c(1,4)]
+  }
+}
+miRqtl.lead.enrich.enhancer = do.call(rbind, miRqtl.lead.enrich.enhancer)
+
+# Bar plot
+miRqtl.lead.enrich.enhancer$BrainRegion = factor(miRqtl.lead.enrich.enhancer$BrainRegion, levels=c("dlpfc", "mpfc", "hippo", "caudate"), labels=c("DLPFC", "mPFC", "Hippocampus", "Caudate"))
+miRqtl.lead.enrich.enhancer$Race = factor(miRqtl.lead.enrich.enhancer$Race, levels=c("cauc", "aa"), labels=c("CAUC", "AA"))
+miRqtl.lead.enrich.enhancer$Type = factor(miRqtl.lead.enrich.enhancer$Type, levels=c("Neuron", "Oligo", "LHX2", "PU1"))
+
+p = ggplot(miRqtl.lead.enrich.enhancer, aes(x=BrainRegion, y=-log10(enrich_pval), fill=Type)) + facet_grid(Race~.)
+p = p + geom_bar(stat="identity", position=position_dodge())
+p
+```
+
+#### GARFIELD
+
+We used GARFIELD software package. See details in the methods section.
+
+#### Host-miRNA
+
+colocalization between host RNA and miRNA was calculated in freeze082825_host_cleaned.Rmd
+
+```{r}
+temp = subset(miRqtl.host2, emir)
+nrow(temp) # 445
+temp$coloc.sig = FALSE
+temp$coloc.sig[which(temp$coloc.h4>0.5)] = TRUE
+table(temp$coloc.sig) # 34
+with(subset(temp, coloc.sig), unique(paste(miRgeID, gene_id))) %>% length() # 16
+
+temp = temp %>% mutate(race = recode(race, "cauc" = "WA", "aa"   = "BA"), region = recode(region, "caudate"="Caudate", "dlpfc"="DLPFC", "hippo"="Hippocampus", "mpfc"="mPFC"))
+  
+p = ggplot(temp, aes(x=corr, col=coloc.sig))+facet_grid(race~region)
+p = p + stat_ecdf(linewidth=1)
+p = p + scale_color_manual(values=c("black", "red"))
+p = p + labs(x="Correlation between miRNA and host mRNA", y="Cumulative proportion")
+p = p + theme_pubr(legend="right") + labs_pubr() + cowplot::background_grid()
+p
+```
+
+# 5. TWAS
+See our pipeline in https://github.com/arunhpatil/miRQTL
+
